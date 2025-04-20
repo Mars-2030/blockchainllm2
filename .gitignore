@@ -25,7 +25,7 @@ ENV/
 
 # Output folders
 output/
-output_openai/
+output*/
 
 # Log files
 *.log
@@ -33,3 +33,5 @@ output_openai/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+config.py
