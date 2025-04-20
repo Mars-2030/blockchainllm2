@@ -25,8 +25,8 @@ ENV/
 
 # Output folders
 output/
-# output*/
-# **/output*/
+output*/
+**/output*/
 
 
 # Log files
