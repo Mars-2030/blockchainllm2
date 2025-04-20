@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
-from config import console, Colors, ensure_folder_exists, save_console_html, PROFESSOR_PROVIDED_OPENAI_API_KEY
+from config import console, Colors, ensure_folder_exists, save_console_html, OPENAI_API_KEY
 from src.scenario.generator import PandemicScenarioGenerator
 from src.scenario.visualizer import (
     visualize_epidemic_curves,
@@ -278,8 +278,8 @@ def run_openai_pandemic_simulation(
     return results
 
 if __name__ == "__main__":
-    # Use the API key provided earlier in the PROFESSOR_PROVIDED_OPENAI_API_KEY variable.
-    openai_key = PROFESSOR_PROVIDED_OPENAI_API_KEY
+    # Use the API key provided earlier in the OPENAI_API_KEY variable.
+    openai_key = OPENAI_API_KEY
 
     now = datetime.datetime.now()
     # Format it as YYYYMMDD_HHMMSS (or choose your preferred format)

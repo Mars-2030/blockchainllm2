@@ -7,7 +7,11 @@ import numpy as np
 # from rich.console import Console
 from rich.console import Console
 from rich.terminal_theme import MONOKAI
+from dotenv import load_dotenv 
 
+
+# Load environment variables from .env file
+load_dotenv()
 # Create rich console
 console = Console(record=True, width=120)
 
@@ -15,10 +19,10 @@ console = Console(record=True, width=120)
 np.random.seed(42)
 
 # API key handling - Replace with your actual key
-PROFESSOR_PROVIDED_OPENAI_API_KEY = "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"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Check API key
-if not PROFESSOR_PROVIDED_OPENAI_API_KEY or PROFESSOR_PROVIDED_OPENAI_API_KEY == "YOUR_OPENAI_API_KEY" or PROFESSOR_PROVIDED_OPENAI_API_KEY == "여기에_교수님께_받은_API_키를_넣으세요":
+if not OPENAI_API_KEY or OPENAI_API_KEY == "YOUR_OPENAI_API_KEY" or OPENAI_API_KEY == "Insert the API key":
     console.print("[bold red]Error: Please replace 'YOUR_OPENAI_API_KEY' in the code with the actual OpenAI API key.[/]")
     exit(1)
 

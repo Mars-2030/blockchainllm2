@@ -26,6 +26,8 @@ ENV/
 # Output folders
 output/
 output*/
+**/output*/
+
 
 # Log files
 *.log
@@ -34,4 +36,5 @@ output*/
 .DS_Store
 Thumbs.db
 
-config.py
+# Environment variables
+.env
