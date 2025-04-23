@@ -193,8 +193,7 @@ MetaMask is primarily for interacting with public testnets or mainnet, or for de
     *   **`.png` files:** Analyze the generated plots for supply chain performance, inventory levels, epidemic curves, etc.
 
 ## Project Structure
-
-
+```
 .
 ├── .env                   # Environment variables (API Keys, Private Key - Gitignored)
 ├── .gitignore             # Git ignore file
@@ -242,6 +241,7 @@ MetaMask is primarily for interacting with public testnets or mainnet, or for de
 │       └── forecasting.py # Epidemic and disruption forecasting tools
 ├── test/                  # (Optional) Hardhat tests for the smart contract
 └── venv/                  # Python virtual environment (created by user - Gitignored)
+```
 
 ##  Improvements
 *   Implement more complex smart contracts for other supply chain actions (e.g., tracking shipments, verifying authenticity). (May be)
@@ -249,6 +249,3 @@ MetaMask is primarily for interacting with public testnets or mainnet, or for de
 *   Develop a web-based UI for running simulations and visualizing results.
 *   Integrate with public testnets (like Sepolia) for more realistic deployment scenarios (requires test ETH and adjusting `hardhat.config.js`).
 
-## License
-
-(Specify your license here, e.g., MIT)
