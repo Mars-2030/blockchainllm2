@@ -249,4 +249,5 @@ MetaMask is primarily for interacting with public testnets or mainnet, or for de
 *   Develop a web-based UI for running simulations and visualizing results.
 *   Integrate with public testnets (like Sepolia) for more realistic deployment scenarios (requires test ETH and adjusting `hardhat.config.js`).
 *   review metrics and calculate gas consumption
+*   create a baseline for comparison, remove llms and use rule based allocation 
 
