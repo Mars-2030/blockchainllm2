@@ -1,3 +1,5 @@
+# --- START OF FILE main.py ---
+
 #!/usr/bin/env python3
 """
 Pandemic Supply Chain Simulation - Main Entry Point
@@ -10,33 +12,39 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
+import os # Added for path joining
+from typing import Optional # For type hinting
 
-from config import console, Colors, ensure_folder_exists, save_console_html, OPENAI_API_KEY
+# Updated import order to match config first
+from config import (
+    console, Colors, ensure_folder_exists, save_console_html, OPENAI_API_KEY,
+    NODE_URL, CONTRACT_ADDRESS, CONTRACT_ABI_PATH, BLOCKCHAIN_PRIVATE_KEY,
+    check_blockchain_config
+)
 from src.scenario.generator import PandemicScenarioGenerator
 from src.scenario.visualizer import (
     visualize_epidemic_curves,
     visualize_drug_demand,
     visualize_disruptions,
-    visualize_sir_components,  
-    visualize_sir_simulation   
+    visualize_sir_components,
+    visualize_sir_simulation
 )
 from src.environment.supply_chain import PandemicSupplyChainEnvironment
 from src.environment.metrics import track_service_levels, visualize_service_levels, visualize_performance, visualize_inventory_levels
-from src.tools import PandemicSupplyChainTools
+from src.tools import PandemicSupplyChainTools # Import the class
 from src.llm.openai_integration import OpenAILLMIntegration
 from src.agents.manufacturer import create_openai_manufacturer_agent
 from src.agents.distributor import create_openai_distributor_agent
 from src.agents.hospital import create_openai_hospital_agent
 from src.blockchain.interface import BlockchainInterface
 
+
 import datetime
 
-
-# Create rich console
-# console = Console(record=True, width=120)
+# Create rich console is now done in config.py
 
 def run_openai_pandemic_simulation(
-    console: Console, 
+    console: Console,
     openai_api_key: str,
     num_regions: int = 5,
     num_drugs: int = 3,
@@ -50,13 +58,14 @@ def run_openai_pandemic_simulation(
     verbose: bool = True,
     use_colors: bool = True,
     output_folder: str = "output",
-    blockchain_interface = None,
+    blockchain_interface: Optional[BlockchainInterface] = None, # Allow None
     use_blockchain: bool = False
 ):
     """Run simulation with OpenAI-powered agents."""
 
     if not use_colors: console.no_color = True
-    console.print("[bold]Initializing OpenAI-powered pandemic supply chain simulation...[/]")
+    sim_type = "OpenAI" + (" + Blockchain" if use_blockchain else "")
+    console.print(f"[bold]Initializing {sim_type}-powered pandemic supply chain simulation...[/]")
 
     # Create scenario and environment
     scenario_generator = PandemicScenarioGenerator(
@@ -67,7 +76,7 @@ def run_openai_pandemic_simulation(
     )
     environment = PandemicSupplyChainEnvironment(
         scenario_generator,
-        blockchain_interface=blockchain_interface,
+        blockchain_interface=blockchain_interface, # Pass the interface object
         use_blockchain=use_blockchain,
         console=console
     )
@@ -75,7 +84,7 @@ def run_openai_pandemic_simulation(
     environment.allocation_batch_frequency = allocation_batch_frequency
     environment.verbose = verbose
 
-    # Create tools
+    # Create tools instance
     tools = PandemicSupplyChainTools()
 
     # Create OpenAI integration
@@ -85,124 +94,189 @@ def run_openai_pandemic_simulation(
         console.print(f"[bold red]Failed to initialize OpenAI Integration: {e}. Aborting simulation.[/]")
         return None # Indicate failure
 
-    # Create OpenAI-powered agents
-    manufacturer = create_openai_manufacturer_agent(tools, openai_integration, verbose=verbose, console=console)
-    distributors = [create_openai_distributor_agent(r, tools, openai_integration,num_regions=num_regions, verbose=verbose, console=console) for r in range(num_regions)]
-    hospitals = [create_openai_hospital_agent(r, tools, openai_integration, verbose=verbose, console=console) for r in range(num_regions)]
+    # Create agents, passing the blockchain interface instance if enabled
+    manufacturer = create_openai_manufacturer_agent(
+        tools=tools,
+        openai_integration=openai_integration,
+        num_regions=num_regions, # Pass num_regions
+        memory_length=10,
+        verbose=verbose,
+        console=console,
+        blockchain_interface=blockchain_interface if use_blockchain else None # Pass interface
+    )
+    distributors = [create_openai_distributor_agent(
+        region_id=r,
+        tools=tools,
+        openai_integration=openai_integration,
+        num_regions=num_regions,
+        memory_length=10,
+        verbose=verbose,
+        console=console,
+        blockchain_interface=blockchain_interface if use_blockchain else None # Pass interface
+        ) for r in range(num_regions)]
+    hospitals = [create_openai_hospital_agent(
+        region_id=r,
+        tools=tools,
+        openai_integration=openai_integration,
+        memory_length=10,
+        verbose=verbose,
+        console=console,
+        blockchain_interface=blockchain_interface if use_blockchain else None # Pass interface
+        ) for r in range(num_regions)]
 
     # Reset environment and metrics
-    observations = environment.reset()
+    observations = environment.reset() # Reset should handle initializing blockchain state if needed
     metrics_history = {"stockouts": [], "unfulfilled_demand": [], "patient_impact": []}
 
     console.print(f"[bold]Running simulation for {simulation_days} days using {model_name}...[/]")
     start_time = time.time()
 
     # Simulation loop
-    for day_index in range(simulation_days): 
+    for day_index in range(simulation_days):
         current_sim_day = day_index + 1 # Actual simulation day number (1-based)
-        # if (day_index % 10 == 0 and not verbose) or verbose: # Print header periodically or always if verbose
-        #     console.print(f"SIMULATION DAY {current_sim_day}/{simulation_days}", style="cyan")
         console.rule(f"[bold cyan] Starting Day {current_sim_day}/{simulation_days} [/bold cyan]", style="cyan")
 
-                   # --- Print Daily Epidemic State (if verbose) ---
+        # --- Print Daily Epidemic State (if verbose) ---
+        # This table now shows internal simulation cases vs blockchain cases vs projected demand
         if verbose:
             epi_table = Table(title=f"Epidemic State - Day {current_sim_day}", show_header=True, header_style="bold magenta", box=box.SIMPLE)
             epi_table.add_column("Region", style="cyan")
-            epi_table.add_column("Active Cases", style="white", justify="right")
-            epi_table.add_column("Trend (7d)", style="yellow", justify="right")
+            epi_table.add_column("Cases (Sim)", style="white", justify="right") # Internal Simulation Cases
+            # epi_table.add_column("Trend (7d)", style="yellow", justify="right") # Trend info removed from obs
+            epi_table.add_column("Proj.Demand(Sum)", style="magenta", justify="right") # Show Projected Demand Summary
+            if use_blockchain and blockchain_interface:
+                 epi_table.add_column("Cases (BC)", style=Colors.BLOCKCHAIN, justify="right")
 
             scenario = environment.scenario # Get scenario object
             num_regions_in_scenario = len(scenario.regions) # Use actual num regions from scenario
 
             for r_id in range(num_regions_in_scenario):
                  region_name = scenario.regions[r_id].get("name", f"Region-{r_id+1}")
-                 # Ensure we don't go out of bounds for epidemic_curves
+                 bc_cases_str = "[dim]N/A[/]" # Default if BC disabled or error
+
+                 # Get internal simulation state for comparison display
                  if r_id in scenario.epidemic_curves:
                       curve = scenario.epidemic_curves[r_id]
-                      current_idx = min(day_index, len(curve) - 1) # Use day_index (0-based) for curve access
-                      prev_idx = max(0, current_idx - 7)
-
+                      # Use day_index (0-based) for curve access, check bounds
+                      current_idx = min(day_index, len(curve) - 1)
                       if current_idx >= 0 and len(curve) > current_idx:
-                           current_cases = curve[current_idx]
-                           # Ensure prev_idx is valid before accessing
-                           prev_cases = curve[prev_idx] if len(curve) > prev_idx else 0
-                           trend = current_cases - prev_cases if current_idx >= 7 else current_cases # Approx trend if less than 7 days history
-                           epi_table.add_row(region_name, f"{current_cases:.0f}", f"{trend:+.0f}")
+                           sim_cases = curve[current_idx]
+                           sim_cases_str = f"{sim_cases:.0f}"
+                           # Calculate projected demand for this region (sum across drugs for display)
+                           #proj_demand_region = sum(scenario.get_daily_drug_demand(current_day=day_index, region_id=r_id, drug_id=d_id) for d_id in range(environment.num_drugs))
+                           proj_demand_region = sum(scenario.get_daily_drug_demand(day=day_index, region_id=r_id, drug_id=d_id) for d_id in range(environment.num_drugs)) # Use day= instead of current_day=
+                           proj_demand_str = f"{proj_demand_region:.0f}"
                       else:
-                            epi_table.add_row(region_name, "[dim]N/A[/]", "[dim]N/A[/]")
+                          sim_cases_str = "[dim]N/A[/]"; proj_demand_str = "[dim]N/A[/]"
                  else:
-                       epi_table.add_row(region_name, "[dim]No Data[/]", "[dim]No Data[/]")
+                       sim_cases_str = "[dim]No Data[/]"; proj_demand_str = "[dim]No Data[/]"
+
+                 # Query blockchain if enabled
+                 if use_blockchain and blockchain_interface:
+                     try:
+                          # Note: This is a read operation for display, agent reads separately via tool
+                          bc_cases = blockchain_interface.get_regional_case_count(r_id)
+                          bc_cases_str = f"{bc_cases}" if bc_cases is not None else "[red]Error[/]"
+                     except Exception as e:
+                          bc_cases_str = "[red]QueryErr[/]"
+
+                 # Add row to table
+                 if use_blockchain and blockchain_interface:
+                       epi_table.add_row(region_name, sim_cases_str, proj_demand_str, bc_cases_str)
+                 else:
+                       epi_table.add_row(region_name, sim_cases_str, proj_demand_str)
 
             console.print(epi_table)
             console.print()
-        
+
 
         # --- Get Decisions ---
         all_actions = {}
-        
+        manu_decision = {}; dist_orders = {}; dist_allocs = {}; hosp_orders = {}
+
         # Manufacturer
         try:
-            manu_decision = manufacturer.decide(observations["manufacturer"])
-            all_actions.update(manu_decision)
+            manu_obs = observations.get("manufacturer", {}) # Observation now excludes direct cases/trend
+            if manu_obs:
+                manu_decision = manufacturer.decide(manu_obs) # Agent uses tool to get BC cases
+            else:
+                console.print("[yellow]Warning: No manufacturer observation found.[/]")
+                manu_decision = {} # Empty decision if no observation
+            all_actions.update(manu_decision or {}) # Use empty dict if decision failed
+
             # Verbose printing for manufacturer decisions
             if verbose and manu_decision.get("manufacturer_production"):
                 prod_str = {k: f"{v:.1f}" for k, v in manu_decision["manufacturer_production"].items()}
-                console.print(f"[blue]Manu Production:[/]{prod_str}")
+                console.print(f"[{Colors.MANUFACTURER}]Manu Production:[/]{prod_str}")
             if verbose and manu_decision.get("manufacturer_allocation"):
                 alloc_str = {k: {k2: f"{v2:.1f}" for k2, v2 in v.items()} for k, v in manu_decision["manufacturer_allocation"].items()}
-                console.print(f"[blue]Manu Allocation:[/]{alloc_str}")
+                console.print(f"[{Colors.MANUFACTURER}]Manu Allocation Request:[/]{alloc_str}")
         except Exception as e:
             console.print(f"[bold red]Error during Manufacturer decision on day {current_sim_day}: {e}[/]")
+            console.print_exception(show_locals=False)
             # Provide empty actions as fallback
             all_actions["manufacturer_production"] = {}
             all_actions["manufacturer_allocation"] = {}
 
         # Distributors
-        dist_orders = {}
-        dist_allocs = {}
         for dist_agent in distributors:
             try:
-                dist_decision = dist_agent.decide(observations["distributors"][dist_agent.agent_id])
+                dist_obs = observations.get("distributors", {}).get(dist_agent.agent_id)
+                if dist_obs:
+                    dist_decision = dist_agent.decide(dist_obs)
+                else:
+                    console.print(f"[yellow]Warning: No observation found for Distributor {dist_agent.agent_id}.[/]")
+                    dist_decision = {}
+
                 if dist_decision.get("distributor_orders"):
                     dist_orders.update(dist_decision["distributor_orders"])
                 if dist_decision.get("distributor_allocation"):
                     dist_allocs.update(dist_decision["distributor_allocation"])
+
                 # Verbose printing
                 if verbose and dist_decision.get("distributor_orders"):
                     order_str = {k: f"{v:.1f}" for k, v in dist_decision["distributor_orders"].get(dist_agent.agent_id, {}).items()}
-                    if order_str: console.print(f"[green]Dist {dist_agent.agent_id} Orders:[/]{order_str}")
+                    if order_str: console.print(f"[{Colors.DISTRIBUTOR}]Dist {dist_agent.agent_id} Orders:[/]{order_str}")
                 if verbose and dist_decision.get("distributor_allocation"):
                     alloc_str = {k: f"{v:.1f}" for k, v in dist_decision["distributor_allocation"].get(dist_agent.agent_id, {}).items()}
-                    if alloc_str: console.print(f"[green]Dist {dist_agent.agent_id} Allocation:[/]{alloc_str}")
+                    if alloc_str: console.print(f"[{Colors.DISTRIBUTOR}]Dist {dist_agent.agent_id} Allocation:[/]{alloc_str}")
             except Exception as e:
                 console.print(f"[bold red]Error during Distributor {dist_agent.agent_id} decision on day {current_sim_day}: {e}[/]")
+                console.print_exception(show_locals=False)
                 # Provide empty actions for this agent
                 dist_orders[dist_agent.agent_id] = {}
                 dist_allocs[dist_agent.agent_id] = {}
-
         all_actions["distributor_orders"] = dist_orders
         all_actions["distributor_allocation"] = dist_allocs
 
         # Hospitals
-        hosp_orders = {}
         for hosp_agent in hospitals:
             try:
-                hosp_decision = hosp_agent.decide(observations["hospitals"][hosp_agent.agent_id])
+                hosp_obs = observations.get("hospitals", {}).get(hosp_agent.agent_id)
+                if hosp_obs:
+                    hosp_decision = hosp_agent.decide(hosp_obs)
+                else:
+                    console.print(f"[yellow]Warning: No observation found for Hospital {hosp_agent.agent_id}.[/]")
+                    hosp_decision = {}
+
                 if hosp_decision.get("hospital_orders"):
                     hosp_orders.update(hosp_decision["hospital_orders"])
                 # Verbose printing
                 if verbose and hosp_decision.get("hospital_orders"):
                     order_str = {k: f"{v:.1f}" for k, v in hosp_decision["hospital_orders"].get(hosp_agent.agent_id, {}).items()}
-                    if order_str: console.print(f"[magenta]Hosp {hosp_agent.agent_id} Orders:[/]{order_str}")
+                    if order_str: console.print(f"[{Colors.HOSPITAL}]Hosp {hosp_agent.agent_id} Orders:[/]{order_str}")
             except Exception as e:
                 console.print(f"[bold red]Error during Hospital {hosp_agent.agent_id} decision on day {current_sim_day}: {e}[/]")
+                console.print_exception(show_locals=False)
                 # Provide empty actions for this agent
                 hosp_orders[hosp_agent.agent_id] = {}
-
         all_actions["hospital_orders"] = hosp_orders
 
         # --- Step Environment ---
         try:
+            # Environment step now receives actions based on agent decisions
+            # If blockchain is used, the environment's _calculate_fair_allocation
+            # will call the blockchain, overriding the manufacturer's requested amounts.
             observations, rewards, done, info = environment.step(all_actions)
         except Exception as e:
             console.print(f"[bold red]CRITICAL ERROR during environment step on day {current_sim_day}: {e}[/]")
@@ -215,11 +289,13 @@ def run_openai_pandemic_simulation(
             # Print summary state or specific warnings
             wh_inv = info.get('warehouse_inventory', {})
             manu_inv = info.get('manufacturer_inventory', {})
-            console.print(f"Day {info['current_day']} End: WH Inv:{sum(wh_inv.values()):.0f}, Manu Inv:{sum(float(v) for v in manu_inv.values()):.0f}")
+            pending_str = ", PendingAlloc: Yes" if info.get('pending_allocations') else ""
+            console.print(f"Day {info['current_day']} End: WH Inv:{sum(wh_inv.values()):.0f}, Manu Inv:{sum(float(v) for v in manu_inv.values()):.0f}{pending_str}")
             # Check for significant stockouts
-            day_stockouts = sum(s['unfulfilled'] for s in environment.stockout_history if s['day']==info['current_day']-1) # Stockout history is for day just ended
+            # Stockout history index needs care, day just ended is current_day - 1
+            day_stockouts = sum(s['unfulfilled'] for s in environment.stockout_history if s['day']==info['current_day']-1)
             if day_stockouts > 0:
-                console.print(f"[yellow]Stockouts this day: {day_stockouts:.1f} units unfulfilled.[/]")
+                console.print(f"[{Colors.STOCKOUT}]Stockouts recorded for day {info['current_day']-1}: {day_stockouts:.1f} units unfulfilled.[/]")
 
         # Record metrics history (ensure keys exist)
         metrics_history["stockouts"].append(info.get("stockouts", {}))
@@ -252,71 +328,57 @@ def run_openai_pandemic_simulation(
     }
 
     # Generate visualizations if requested
-
     if visualize:
         console.print("[bold]Generating visualizations...[/]")
-        try: 
-            # Basic scenario visualizations
+        try:
             visualize_epidemic_curves(scenario_generator, output_folder, console=console)
             visualize_drug_demand(scenario_generator, output_folder, console=console)
             visualize_disruptions(scenario_generator, output_folder, console=console)
-            
-            # SIR model specific visualizations
             visualize_sir_components(scenario_generator, output_folder, console=console)
-            # Visualize SIR details for a few selected regions
-            for region_id in range(min(3, num_regions)):  # First 3 regions or fewer
+            for region_id in range(min(3, num_regions)):
                 visualize_sir_simulation(scenario_generator, region_id, output_folder, console=console)
-            
-            # Supply chain performance visualizations
             visualize_performance(environment, output_folder, console=console)
             visualize_inventory_levels(environment, output_folder, console=console)
             visualize_service_levels(environment, output_folder, console=console)
         except Exception as e:
             console.print(f"[red]Error during visualization: {e}[/]")
-            console.print_exception(show_locals=True)  # More detailed error info
+            console.print_exception(show_locals=True)
 
     return results
 
 if __name__ == "__main__":
-    # Use the API key provided earlier in the OPENAI_API_KEY variable.
     openai_key = OPENAI_API_KEY
-
     now = datetime.datetime.now()
-    # Format it as YYYYMMDD_HHMMSS (or choose your preferred format)
     timestamp = now.strftime("%Y%m%d_%H%M%S")
 
     parser = argparse.ArgumentParser(description="Run pandemic supply chain simulation with OpenAI agents")
-    parser.add_argument("--regions", type=int, default=5, help="Number of regions")
+    parser.add_argument("--regions", type=int, default=3, help="Number of regions")
     parser.add_argument("--drugs", type=int, default=3, help="Number of drugs")
-    parser.add_argument("--days", type=int, default=30, help="Simulation days") # Default to 30 for better results view
+    parser.add_argument("--days", type=int, default=30, help="Simulation days")
     parser.add_argument("--severity", type=float, default=0.8, help="Pandemic severity (0-1)")
     parser.add_argument("--disrupt-prob", type=float, default=0.1, help="Base disruption probability factor")
     parser.add_argument("--model", type=str, default="gpt-3.5-turbo", help="OpenAI model name (e.g., gpt-3.5-turbo, gpt-4-turbo-preview, gpt-4o)")
     parser.add_argument("--no-viz", action="store_false", dest="visualize", help="Disable visualizations")
-    parser.add_argument("--quiet", action="store_false", dest="verbose", help="Less verbose output (API calls still shown)")
+    parser.add_argument("--quiet", action="store_false", dest="verbose", help="Less verbose output")
     parser.add_argument("--no-colors", action="store_false", dest="use_colors", help="Disable colored output")
     parser.add_argument("--folder", type=str, default="output", help="Folder for simulation output")
-    parser.add_argument("--warehouse-delay", type=int, default=3, help="Warehouse release delay (days)")
-    parser.add_argument("--allocation-batch", type=int, default=7, help="Allocation batch frequency (days, 1=daily)")
+    parser.add_argument("--warehouse-delay", type=int, default=1, help="Warehouse release delay (days)")
+    parser.add_argument("--allocation-batch", type=int, default=1, help="Allocation batch frequency (days, 1=daily)")
     parser.add_argument("--use-blockchain", action="store_true", default=False, help="Enable blockchain integration")
-    parser.add_argument("--node-url", type=str, default="http://127.0.0.1:8545", help="Ethereum node URL (e.g., Ganache, Infura)")
 
     args = parser.parse_args()
 
     if not args.use_colors: console.no_color = True
 
     output_folder_path = f"{args.folder}_{timestamp}_regions{args.regions}_drug{args.drugs}_days{args.days}"
-    # Intro Panel
+    if args.use_blockchain: output_folder_path += "_blockchain"
     console.print(Panel("[bold white]🦠 PANDEMIC SUPPLY CHAIN SIMULATION (using OpenAI) 🦠[/]", border_style="blue", expand=False, padding=(1,2)))
 
     # Config Table
     config_table = Table(title="Simulation Configuration", show_header=True, header_style="bold cyan", box=box.ROUNDED)
-    config_table.add_column("Parameter", style="cyan")
-    config_table.add_column("Value", style="white")
-    config_table.add_row("Regions", str(args.regions))
-    config_table.add_row("Drugs", str(args.drugs))
-    config_table.add_row("Simulation Days", str(args.days))
-    config_table.add_row("Pandemic Severity", f"{args.severity:.2f}")
+    config_table.add_column("Parameter", style="cyan"); config_table.add_column("Value", style="white")
+    config_table.add_row("Regions", str(args.regions)); config_table.add_row("Drugs", str(args.drugs))
+    config_table.add_row("Simulation Days", str(args.days)); config_table.add_row("Pandemic Severity", f"{args.severity:.2f}")
     config_table.add_row("Disruption Probability Factor", f"{args.disrupt_prob:.2f}")
     config_table.add_row("Warehouse Delay", f"{args.warehouse_delay} days")
     config_table.add_row("Allocation Batch Frequency", f"{args.allocation_batch} days" if args.allocation_batch > 1 else "Daily")
@@ -324,42 +386,51 @@ if __name__ == "__main__":
     config_table.add_row("Visualizations", "Enabled" if args.visualize else "Disabled")
     config_table.add_row("Verbose Output", "Enabled" if args.verbose else "Disabled")
     config_table.add_row("Output Folder", output_folder_path)
-    config_table.add_row("Blockchain", "Enabled" if args.use_blockchain else "Disabled")
-    console.print(config_table)
-    console.print() # Spacer
+    config_table.add_row("Blockchain", "[bold green]Enabled[/]" if args.use_blockchain else "Disabled")
+    if args.use_blockchain:
+         config_table.add_row("  Node URL", NODE_URL)
+         config_table.add_row("  Contract Address", CONTRACT_ADDRESS or "[red]Not Set[/]")
+         config_table.add_row("  ABI Path", CONTRACT_ABI_PATH)
+         config_table.add_row("  Signer Key Loaded", "[green]Yes[/]" if BLOCKCHAIN_PRIVATE_KEY else "[red]No[/]")
+    console.print(config_table); console.print()
 
     # Ensure output folder exists
-    output_folder = ensure_folder_exists(console,output_folder_path)
+    output_folder = ensure_folder_exists(console, output_folder_path)
 
     # --- INITIALIZE BLOCKCHAIN INTERFACE ---
-    blockchain_interface = None # Initialize as None
-    use_blockchain_flag = False # Initialize flag
+    blockchain_interface_instance = None # Initialize as None
+    actual_use_blockchain_flag = False # Flag indicating successful BC init
 
     if args.use_blockchain:
         console.print("\n[bold cyan]Attempting Blockchain Integration...[/]")
+        if BlockchainInterface is None:
+             console.print("[bold red]❌ Blockchain support not available (missing dependencies?). Halting.[/]")
+             exit(1)
+        if not check_blockchain_config(): # Uses function from config.py
+             console.print("[bold red]❌ Blockchain configuration incomplete in .env or ABI file missing. Halting.[/]")
+             console.print("[bold red]   Please ensure NODE_URL, CONTRACT_ADDRESS, BLOCKCHAIN_PRIVATE_KEY are set and ABI exists.[/]")
+             exit(1)
         try:
-            # Pass the node URL if provided, otherwise it uses the default in the class
-            blockchain_interface = BlockchainInterface(node_url=args.node_url)
-            use_blockchain_flag = True # Set flag *only* on success
-            console.print(f"[bold green]✓ Connected to Ethereum node at {blockchain_interface.node_url}[/]")
+            # Pass the config values to the interface
+            blockchain_interface_instance = BlockchainInterface(
+                node_url=NODE_URL,
+                contract_address=CONTRACT_ADDRESS,
+                contract_abi_path=CONTRACT_ABI_PATH,
+                private_key=BLOCKCHAIN_PRIVATE_KEY
+            )
+            actual_use_blockchain_flag = True # Set flag *only* on success
+            console.print(f"[bold green]✓ Connected to Ethereum node and loaded contract.[/]")
         except Exception as e:
-            # CRITICAL FAILURE - HALT SIMULATION
-            console.print(f"[bold red]❌ FATAL ERROR: Could not connect to blockchain or initialize contract interface: {e}[/]")
-            console.print("[bold red]   Blockchain integration was requested (--use-blockchain) but failed.[/]")
+            console.print(f"[bold red]❌ FATAL ERROR: Could not initialize Blockchain Interface: {e}[/]")
+            console.print("[bold red]   Check node connection, contract address, ABI path, and private key format.[/]")
             console.print("[bold red]   Halting simulation execution.[/]")
-            # Save console output *before* exiting
-            try:
-                save_console_html(console, output_folder=output_folder, filename="simulation_error_report.html")
-                console.print("[yellow]Partial error report saved to simulation_error_report.html[/]")
-            except Exception as save_e:
-                console.print(f"[red]Could not save error report: {save_e}[/]")
+            try: save_console_html(console, output_folder=output_folder, filename="simulation_error_report.html")
+            except Exception as save_e: console.print(f"[red]Could not save error report: {save_e}[/]")
             exit(1) # Exit the program with a non-zero code indicating error
     else:
-        # Blockchain explicitly disabled by argument
-        use_blockchain_flag = False
+        actual_use_blockchain_flag = False
         console.print("\n[yellow]Blockchain integration disabled by command-line argument.[/]")
         console.print("[yellow]Running in simulation-only mode.[/]")
-
     console.print("-" * 30) # Separator
 
     # --- Run Simulation ---
@@ -378,15 +449,13 @@ if __name__ == "__main__":
         verbose=args.verbose,
         use_colors=args.use_colors,
         output_folder=output_folder,
-        blockchain_interface=blockchain_interface,
-        use_blockchain=use_blockchain_flag
+        blockchain_interface=blockchain_interface_instance, # Pass the created instance
+        use_blockchain=actual_use_blockchain_flag # Use the flag indicating successful init
     )
 
     # --- Display Results ---
     if results: # Check if simulation ran successfully
         console.print(Panel("[bold white]Simulation Results Summary[/]", border_style="green", expand=False))
-
-        # Get scenario info for names
         drug_names = {d['id']: d['name'] for d in results.get('scenario_drugs', [])}
         region_names = {r['id']: r['name'] for r in results.get('scenario_regions', [])}
 
@@ -415,7 +484,6 @@ if __name__ == "__main__":
 
         # Unfulfilled Demand Summary
         total_unfulfilled = sum(sum(drug.values()) for drug in results["total_unfulfilled_demand"].values())
-        # Try to get total demand for percentage calculation
         total_demand_all = sum(sum(drug.values()) for drug in results.get("total_demand", {}).values())
         percent_unfulfilled_str = f" ({ (total_unfulfilled / total_demand_all * 100) if total_demand_all > 0 else 0 :.1f}%)" if total_demand_all > 0 else ""
         color = "red" if total_unfulfilled > 10000 else "yellow" if total_unfulfilled > 0 else "green" # Adjusted threshold
@@ -445,13 +513,7 @@ if __name__ == "__main__":
              avg_service = np.mean([item["service_level"] for item in service_levels]) if service_levels else 0
              min_service = min(item["service_level"] for item in service_levels) if service_levels else 0
              final_service = service_levels[-1]["service_level"] if service_levels else 0
-
-             def get_service_color(level):
-                  if level >= 95: return "green"
-                  elif level >= 90: return "cyan"
-                  elif level >= 80: return "yellow"
-                  else: return "red"
-
+             def get_service_color(level): return "green" if level >= 95 else "cyan" if level >= 90 else "yellow" if level >= 80 else "red"
              service_table_summary.add_row("Average", f"[{get_service_color(avg_service)}]{avg_service:.1f}%[/]")
              service_table_summary.add_row("Minimum", f"[{get_service_color(min_service)}]{min_service:.1f}%[/]")
              service_table_summary.add_row("Final Day", f"[{get_service_color(final_service)}]{final_service:.1f}%[/]")
@@ -474,13 +536,20 @@ if __name__ == "__main__":
         console.print("[bold red]Simulation did not complete successfully. No results to display.[/]")
 
     # --- PRINT FINAL BLOCKCHAIN STATE ---
-    if use_blockchain_flag and blockchain_interface:
+    # Use the actual_use_blockchain_flag and the instance
+    if actual_use_blockchain_flag and blockchain_interface_instance:
         console.print("\n[bold cyan]Querying Final Blockchain State...[/]")
         try:
-            blockchain_interface.print_contract_state()
+            # Pass expected number of regions/drugs for query loop
+            blockchain_interface_instance.print_contract_state(
+                num_regions=args.regions, num_drugs=args.drugs
+            )
         except Exception as e:
             console.print(f"[red]Error querying final blockchain state: {e}[/]")
-    
+
     # Save console output to HTML
-    save_console_html(console,output_folder=output_folder)
+    html_filename = "simulation_report_openai" + ("_blockchain" if actual_use_blockchain_flag else "") + ".html"
+    save_console_html(console, output_folder=output_folder, filename=html_filename)
     console.print(f"\n[green]Visualizations and report saved to folder: '{output_folder}'[/]")
+
+# --- END OF FILE main.py ---

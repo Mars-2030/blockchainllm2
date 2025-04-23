@@ -1,0 +1,24 @@
+{
+  "name": "pandemic_supply_chain_openai",
+  "version": "1.0.0",
+  "description": "This project simulates a multi-echelon (Manufacturer -> Distributor -> Hospital) supply chain for essential drugs during a pandemic scenario. It utilizes Large Language Models (LLMs) via the OpenAI API, combined with rule-based heuristics and forecasting tools, to power the decision-making of agents at each level of the supply chain.",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:localhost": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.5.0",
+    "hardhat": "^2.23.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.3.0"
+  }
+}

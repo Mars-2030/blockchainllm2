@@ -38,3 +38,29 @@ Thumbs.db
 
 # Environment variables
 .env
+node_modules
+.env
+
+# Hardhat files
+/cache
+/artifacts
+
+# TypeChain files
+/typechain
+/typechain-types
+
+# solidity-coverage files
+/coverage
+/coverage.json
+
+# Hardhat Ignition default folder for deployments against a local node
+ignition/deployments/chain-31337
+# Hardhat build info
+artifacts/build-info/
+
+
+
+
+# Saved contract address/abi (optional if read from artifacts)
+src/blockchain/SupplyChainData.address.json
+src/blockchain/SupplyChainData.abi.json

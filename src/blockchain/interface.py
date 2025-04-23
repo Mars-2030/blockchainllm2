@@ -1,302 +1,363 @@
+# --- START OF FILE src/blockchain/interface.py ---
+
 """
-Interface between the pandemic simulation and the Ethereum blockchain.
+Blockchain interface using Web3.py to interact with the SupplyChainData smart contract.
 """
 
 import json
-import os
-from web3 import Web3, HTTPProvider
-# from web3.middleware import ExtraDataToPOAMiddleware # Removed for Hardhat
+import time
+import math
+from web3 import Web3
+from web3.exceptions import ContractLogicError # For handling reverts
+from web3.middleware import geth_poa_middleware # For PoA networks like Sepolia, Goerli, maybe Ganache/Hardhat sometimes
+from typing import Dict, List, Optional, Any
+from rich.console import Console
+
+# Use a shared console or create one if needed (import from config if available, otherwise create)
+try:
+    from config import console, Colors # Assuming console and Colors are defined in config
+except ImportError:
+    console = Console()
+    # Define basic colors if Colors class not available
+    class Colors:
+        BLOCKCHAIN = "bright_black"
+        YELLOW = "yellow"
+        RED = "red"
+        GREEN = "green"
+        DIM = "dim"
+
 
 class BlockchainInterface:
-    """Interface between the pandemic simulation and the Ethereum blockchain."""
+    """Handles communication with the SupplyChainData Ethereum smart contract."""
 
-    def __init__(self, node_url="http://127.0.0.1:8545"):
-        # Connect to the Ethereum node
-        self.w3 = Web3(HTTPProvider(node_url))
+    def __init__(self, node_url: str, contract_address: str, contract_abi_path: str, private_key: Optional[str] = None):
+        """
+        Initializes the connection to the blockchain and loads the contract.
+
+        Args:
+            node_url: URL of the Ethereum node (e.g., "http://127.0.0.1:8545").
+            contract_address: Deployed address of the SupplyChainData contract.
+            contract_abi_path: Path to the JSON ABI file of the contract.
+            private_key: Private key of the account used to send transactions (e.g., updating cases). Optional for read-only interactions.
+        """
         self.node_url = node_url
-
-        # Remove unnecessary middleware for Hardhat local node
-        # self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-
-        # Check connection
-        if not self.w3.is_connected():
-            raise ConnectionError(f"Failed to connect to Ethereum node at {node_url}")
-
-        # --- IMPORTANT: Use the ACTUAL deployed contract address ---
-        # --- Run `npx hardhat run scripts/deploy.js --network localhost` first ---
-        self.contract_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3" # !!! UPDATE THIS ADDRESS !!!
-        # ---
-
-        # ABI (ensure this matches your compiled contract, including view functions)
-        self.contract_abi = [
-            # Actions requiring transactions
-            {"inputs": [{"internalType": "string", "name": "_name", "type": "string"}, {"internalType": "uint8", "name": "_criticality", "type": "uint8"}, {"internalType": "uint256", "name": "_productionCapacity", "type": "uint256"}, {"internalType": "uint256", "name": "_baseProduction", "type": "uint256"}], "name": "addDrug", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-            {"inputs": [{"internalType": "string", "name": "_name", "type": "string"}, {"internalType": "string", "name": "_regionType", "type": "string"}, {"internalType": "uint256", "name": "_population", "type": "uint256"}], "name": "addRegion", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-            {"inputs": [{"internalType": "uint256", "name": "_regionId", "type": "uint256"}, {"internalType": "uint256", "name": "_newCases", "type": "uint256"}], "name": "updateCases", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-            {"inputs": [{"internalType": "uint256", "name": "_drugId", "type": "uint256"}, {"internalType": "uint256", "name": "_regionId", "type": "uint256"}, {"internalType": "uint256", "name": "_amount", "type": "uint256"}], "name": "recordAllocation", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-            # View functions (no transaction needed)
-            {"inputs": [{"internalType": "uint256", "name": "_drugId", "type": "uint256"}, {"internalType": "uint256[]", "name": "_regionIds", "type": "uint256[]"}, {"internalType": "uint256[]", "name": "_requestedAmounts", "type": "uint256[]"}, {"internalType": "uint256", "name": "_availableInventory", "type": "uint256"}], "name": "calculateAllocation", "outputs": [{"internalType": "uint256[]", "name": "", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [], "name": "drugCount", "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [], "name": "regionCount", "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "name": "drugs", "outputs": [{"internalType": "string", "name": "name", "type": "string"}, {"internalType": "enum AllocationStrategy.Criticality", "name": "criticality", "type": "uint8"}, {"internalType": "uint256", "name": "productionCapacity", "type": "uint256"}, {"internalType": "uint256", "name": "baseProduction", "type": "uint256"}, {"internalType": "bool", "name": "active", "type": "bool"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "name": "regions", "outputs": [{"internalType": "string", "name": "name", "type": "string"}, {"internalType": "string", "name": "regionType", "type": "string"}, {"internalType": "uint256", "name": "population", "type": "uint256"}, {"internalType": "uint256", "name": "activeCases", "type": "uint256"}, {"internalType": "bool", "name": "active", "type": "bool"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [{"internalType": "uint256", "name": "_drugId", "type": "uint256"}], "name": "getAllocationHistory", "outputs": [{"components": [{"internalType": "uint256", "name": "drugId", "type": "uint256"}, {"internalType": "uint256", "name": "regionId", "type": "uint256"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}, {"internalType": "uint256", "name": "timestamp", "type": "uint256"}], "internalType": "struct AllocationStrategy.Allocation[]", "name": "", "type": "tuple[]"}], "stateMutability": "view", "type": "function"}
-            # Add other necessary ABI parts (e.g., events, owner, member checks if called directly)
-        ]
-
-        # Get contract instance
-        self.contract = self.w3.eth.contract(address=self.contract_address, abi=self.contract_abi)
-
-        # --- Define Addresses (Match your Hardhat setup from `setup-members.js`) ---
-        self.owner_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"      # Account 0
-        self.manufacturer_address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" # Account 1
-        self.distributor_addresses = {
-            0: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",  # Account 2 (Region 0)
-            1: "0x90F79bf6EB2c4f870365E785982E1f101E93b906"   # Account 3 (Region 1)
-            # Add more if needed
-        }
-        self.hospital_addresses = {
-            0: "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",  # Account 4 (Region 0)
-            1: "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"   # Account 5 (Region 1)
-            # Add more if needed
-        }
-        # ---
-
-        # --- VERY IMPORTANT: Store PRIVATE KEYS for accounts sending transactions ---
-        # --- These are the default Hardhat node keys. Replace if needed. ---
-        # --- WARNING: NEVER commit real private keys to code repositories! Use environment variables or secure secret management in production. ---
-        self.private_keys = {
-            self.owner_address: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", # Key for Account 0
-            self.manufacturer_address: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d", # Key for Account 1
-            self.distributor_addresses[0]: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a", # Key for Account 2
-            self.distributor_addresses[1]: "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6", # Key for Account 3
-            self.hospital_addresses[0]: "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a", # Key for Account 4
-            self.hospital_addresses[1]: "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba", # Key for Account 5
-        }
-        # ---
-
-    def _send_transaction(self, function_call, from_account_address):
-        """Builds, signs, and sends a transaction for the specified account."""
-        normalized_from_address = self.w3.to_checksum_address(from_account_address)
-
-        if normalized_from_address not in self.private_keys:
-             print(f"[ERROR] Private key for account {normalized_from_address} not found in self.private_keys.")
-             return {'status': 'error', 'message': f"Private key for account {normalized_from_address} not found."}
-
-        private_key = self.private_keys[normalized_from_address]
-        account = self.w3.eth.account.from_key(private_key)
-
-        # Double-check the address derived from the key matches the expected address
-        if account.address.lower() != normalized_from_address.lower():
-             print(f"[ERROR] Address mismatch for private key! Expected {normalized_from_address}, derived {account.address}")
-             return {'status': 'error', 'message': f"Address mismatch for private key! Expected {normalized_from_address}, derived {account.address}"}
+        self.contract_address = contract_address
+        self.private_key = private_key
+        self.w3 = None
+        self.contract = None
+        self.account = None
+        # Increased gas limit slightly as a buffer for contract logic
+        self.gas_limit = 3500000
+        # Scaling factor for converting float amounts to integers for the contract
+        self.SCALE_FACTOR = 1000 # Represents 3 decimal places
 
         try:
-            # Get the nonce for the *sending* account
-            nonce = self.w3.eth.get_transaction_count(account.address)
-            print(f"  [TX Info] Sending from: {account.address}, Nonce: {nonce}") # Debug log
+            self.w3 = Web3(Web3.HTTPProvider(node_url))
 
-            # Build transaction specifying the correct 'from' and 'nonce'
-            tx_params = {
-                'from': account.address,
-                'nonce': nonce,
-                # 'gas': 300000,  # Set a reasonable gas limit, or estimate below
-                'gasPrice': self.w3.eth.gas_price
-                # Optional: specify chainId for robustness, especially on non-dev networks
-                # 'chainId': self.w3.eth.chain_id
-            }
+            # Check connection first
+            if not self.w3.is_connected():
+                 raise ConnectionError(f"Failed to connect to Ethereum node at {node_url}")
 
-            # Estimate gas (optional but recommended)
+            # Inject PoA middleware - necessary for some testnets and potentially local nodes
+            # Wraps the provider, does not raise error if already wrapped or not needed
+            self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+            console.print(f"[{Colors.GREEN}]Connected to Ethereum node: {node_url} (Chain ID: {self.w3.eth.chain_id})[/]")
+
+            # Load Contract ABI
+            with open(contract_abi_path, 'r') as f:
+                contract_abi = json.load(f)
+
+            # Load Contract
+            checksum_address = self.w3.to_checksum_address(contract_address)
+            self.contract = self.w3.eth.contract(address=checksum_address, abi=contract_abi)
+            console.print(f"[{Colors.GREEN}]SupplyChainData contract loaded at address: {contract_address}[/]")
+
+            # Set up account for transactions if private key is provided
+            if private_key:
+                # Ensure private key has '0x' prefix
+                if not private_key.startswith('0x'):
+                    private_key = '0x' + private_key
+                self.account = self.w3.eth.account.from_key(private_key)
+                self.w3.eth.default_account = self.account.address # Set default account for calls if needed
+                console.print(f"[{Colors.GREEN}]Transaction account set up: {self.account.address}[/]")
+            else:
+                console.print(f"[{Colors.YELLOW}]Warning: No private key provided. Only read operations possible.[/]")
+
+            # Test contract connection by reading owner (optional but good check)
             try:
-                 estimated_gas = function_call.estimate_gas(tx_params)
-                 tx_params['gas'] = int(estimated_gas * 1.2) # Add 20% buffer
-                 print(f"  [TX Info] Estimated Gas: {estimated_gas}, Using Gas Limit: {tx_params['gas']}")
-            except Exception as estimate_exception:
-                 print(f"  [TX Warning] Gas estimation failed: {estimate_exception}. Using fixed limit 300000.")
-                 # Often, estimation failure means the transaction will revert.
-                 tx_params['gas'] = 300000
+                 owner = self.contract.functions.owner().call()
+                 console.print(f"[{Colors.DIM}]Contract owner found: {owner}[/]")
+            except Exception as e:
+                 # This might happen if ABI is wrong, contract not deployed, or network issue
+                 console.print(f"[{Colors.YELLOW}]Warning: Could not call contract 'owner' function. Contract may not be deployed correctly or ABI mismatch? Error: {e}[/]")
 
 
-            # Build the final transaction object
-            tx = function_call.build_transaction(tx_params)
+        except FileNotFoundError:
+            console.print(f"[bold {Colors.RED}]Error: Contract ABI file not found at {contract_abi_path}[/]")
+            raise
+        except ConnectionError as e:
+            console.print(f"[bold {Colors.RED}]Error connecting to Ethereum node: {e}[/]")
+            raise
+        except Exception as e:
+            # Catch other potential errors during init (e.g., invalid address format)
+            console.print(f"[bold {Colors.RED}]Error initializing BlockchainInterface: {e}[/]")
+            console.print_exception(show_locals=True) # Show traceback for debugging
+            raise
 
-            # Sign transaction with the correct private key
-            signed_tx = self.w3.eth.account.sign_transaction(tx, private_key)
+    def _get_gas_price(self):
+        """Gets gas price based on network conditions."""
+        # For local nodes (Hardhat/Ganache), gas price is often negligible or fixed
+        if self.w3.eth.chain_id in [1337, 31337]: # Common local chain IDs
+            return self.w3.to_wei('10', 'gwei') # A reasonable default for local testing
+        try:
+             # Use eth_gasPrice for simplicity on testnets/mainnet
+             # Add retry logic for robustness
+             for attempt in range(3):
+                 try:
+                     return self.w3.eth.gas_price
+                 except Exception as e:
+                     if attempt < 2:
+                         console.print(f"[{Colors.YELLOW}]Retrying gas price fetch after error: {e}[/]")
+                         time.sleep(0.5 * (attempt + 1)) # Short backoff
+                     else:
+                         raise e # Raise error after final attempt
+             return self.w3.to_wei('20', 'gwei') # Fallback if retries fail
+        except Exception as e:
+            console.print(f"[{Colors.YELLOW}]Warning: Could not fetch gas price, using default 20 gwei. Error: {e}[/]")
+            return self.w3.to_wei('20', 'gwei')
 
-            # Send raw transaction
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            print(f"  [TX Info] Transaction sent: {tx_hash.hex()}")
+    def _send_transaction(self, function_call) -> Optional[Dict[str, Any]]:
+        """Builds, signs, sends a transaction and waits for the receipt."""
+        if not self.account:
+            console.print(f"[bold {Colors.RED}]Error: Cannot send transaction. No private key configured.[/]")
+            return None
+        try:
+            # Use the configured account address
+            sender_address = self.account.address
+            nonce = self.w3.eth.get_transaction_count(sender_address)
+            gas_price = self._get_gas_price()
 
-            # Wait for transaction receipt
-            # Add a timeout to prevent hanging indefinitely if the node has issues
-            tx_receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-            print(f"  [TX Info] Transaction confirmed in block: {tx_receipt.blockNumber}")
-
-            # Check status code for success (1) or failure (0)
-            if tx_receipt.status == 0:
-                 print(f"  [TX ERROR] Transaction {tx_hash.hex()} failed (REVERTED). Status: {tx_receipt.status}. Check node logs for revert reason.")
-                 # Attempt to get revert reason (experimental, may not work reliably)
-                 # try:
-                 #     revert_reason = self.w3.eth.call({'to': tx['to'], 'from': tx['from'], 'value': tx.get('value', 0), 'data': tx['data']}, tx_receipt.blockNumber - 1)
-                 #     # Decode revert reason - this is complex, often needs specific ABI handling
-                 #     print(f"    Potential Revert Reason (Hex): {revert_reason.hex()}")
-                 # except Exception as call_e:
-                 #     print(f"    Could not directly call failed transaction to get revert reason: {call_e}")
-
-                 return {
-                     'status': 'error',
-                     'message': f'Transaction reverted. Hash: {tx_hash.hex()}',
-                     'tx_hash': tx_hash.hex(),
-                     'block': tx_receipt.blockNumber,
-                     'receipt': tx_receipt # Include full receipt for debugging
-                 }
-
-            # Success
-            return {
-                'status': 'success',
-                'tx_hash': tx_hash.hex(),
-                'block': tx_receipt.blockNumber,
-                'receipt': tx_receipt # Include full receipt for info
+            tx_params = {
+                'from': sender_address,
+                'nonce': nonce,
+                'gas': self.gas_limit,
+                'gasPrice': gas_price,
+                # 'chainId': self.w3.eth.chain_id # Optional: explicitly set chain ID
             }
 
-        except ValueError as ve: # Catch specific web3 errors like nonce issues, insufficient funds
-             print(f"  [TX ERROR] ValueError sending transaction from {account.address}: {ve}")
-             # This might contain info about reverts if gas estimation failed earlier
-             return {'status': 'error', 'message': f"ValueError: {ve}"}
+            # Estimate gas (optional, can help catch reverts early, but adds latency)
+            # try:
+            #     estimated_gas = function_call.estimate_gas(tx_params)
+            #     tx_params['gas'] = int(estimated_gas * 1.2) # Add buffer
+            # except ContractLogicError as gas_error:
+            #     console.print(f"[bold {Colors.RED}]Gas estimation failed (potential revert): {gas_error}[/]")
+            #     return {'status': 'failed', 'error': f'Gas estimation failed: {gas_error}'}
+            # except Exception as estimate_e:
+            #      console.print(f"[yellow]Warning: Gas estimation call failed: {estimate_e}. Using default gas limit.[/]")
+
+
+            # Build transaction
+            transaction = function_call.build_transaction(tx_params)
+
+            # Sign transaction
+            signed_tx = self.w3.eth.account.sign_transaction(transaction, self.private_key)
+
+            # Send transaction
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            console.print(f"[{Colors.DIM}]Transaction sent: {tx_hash.hex()}. Waiting for receipt...[/]", style=Colors.BLOCKCHAIN)
+
+            # Wait for receipt with timeout
+            tx_receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180) # 3 min timeout
+
+            if tx_receipt['status'] == 1:
+                console.print(f"[{Colors.GREEN}]✓ Transaction successful! Block: {tx_receipt['blockNumber']}, Gas Used: {tx_receipt['gasUsed']}[/]", style=Colors.BLOCKCHAIN)
+                return {'status': 'success', 'receipt': tx_receipt}
+            else:
+                console.print(f"[bold {Colors.RED}]❌ Transaction failed! Receipt: {tx_receipt}[/]", style=Colors.BLOCKCHAIN)
+                # You might want to try decoding the revert reason here if possible/needed
+                return {'status': 'failed', 'receipt': tx_receipt, 'error': 'Transaction reverted'}
+
+        except ValueError as ve: # Catch specific web3 errors like insufficient funds
+             console.print(f"[bold {Colors.RED}]Transaction ValueError: {ve}[/]")
+             # console.print_exception(show_locals=False)
+             return {'status': 'error', 'error': str(ve)}
+        except Exception as e: # Catch broader errors
+            console.print(f"[bold {Colors.RED}]Error sending transaction: {type(e).__name__} - {e}[/]")
+            # console.print_exception(show_locals=False) # Optional: Add more detailed traceback
+            return {'status': 'error', 'error': str(e)}
+
+
+    # --- Write Methods ---
+
+    def update_regional_case_count(self, region_id: int, cases: int) -> Optional[Dict[str, Any]]:
+        """Updates the case count for a region via a transaction."""
+        if not self.account:
+             console.print(f"[{Colors.YELLOW}]Skipping blockchain case update for R{region_id}: No private key.[/]")
+             return None
+        try:
+            console.print(f"[{Colors.DIM}]Preparing blockchain tx: updateRegionalCaseCount(regionId={region_id}, cases={cases})[/]", style=Colors.BLOCKCHAIN)
+            function_call = self.contract.functions.updateRegionalCaseCount(region_id, cases)
+            return self._send_transaction(function_call)
         except Exception as e:
-            # Catch other unexpected errors during transaction sending/waiting
-            print(f"  [TX ERROR] Unexpected Error sending transaction from {account.address}: {repr(e)}")
-            import traceback
-            traceback.print_exc() # Print stack trace for debugging
-            return {
-                'status': 'error',
-                'message': f"Unexpected Error: {repr(e)}"
+            console.print(f"[{Colors.RED}]Error preparing updateRegionalCaseCount transaction: {e}[/]")
+            return {'status': 'error', 'error': str(e)}
+
+    def set_drug_criticality(self, drug_id: int, criticality_value: int) -> Optional[Dict[str, Any]]:
+        """Sets the drug criticality value via a transaction (likely used during setup)."""
+        if not self.account:
+             console.print(f"[{Colors.YELLOW}]Skipping blockchain criticality set for D{drug_id}: No private key.[/]")
+             return None
+        try:
+            console.print(f"[{Colors.DIM}]Preparing blockchain tx: setDrugCriticality(drugId={drug_id}, criticalityValue={criticality_value})[/]", style=Colors.BLOCKCHAIN)
+            function_call = self.contract.functions.setDrugCriticality(drug_id, criticality_value)
+            return self._send_transaction(function_call)
+        except Exception as e:
+            console.print(f"[{Colors.RED}]Error preparing setDrugCriticality transaction: {e}[/]")
+            return {'status': 'error', 'error': str(e)}
+
+    def execute_fair_allocation(self, drug_id: int, region_ids: List[int], requested_amounts: List[float], available_inventory: float) -> Optional[Dict[int, float]]:
+        """
+        Triggers the fair allocation logic on the smart contract.
+        Uses call() to get simulated result for simulation, then sends the transaction.
+
+        Args:
+            drug_id: ID of the drug.
+            region_ids: List of requesting region IDs.
+            requested_amounts: List of corresponding requested amounts (float).
+            available_inventory: Total available inventory (float).
+
+        Returns:
+            A dictionary {region_id: allocated_amount (float)} based on the simulated call(), or None if simulation fails.
+        """
+        try:
+            # Convert float amounts to integers for the contract
+            requested_amounts_int = [int(round(r * self.SCALE_FACTOR)) for r in requested_amounts]
+            available_inventory_int = int(round(available_inventory * self.SCALE_FACTOR))
+
+            # Handle edge case: If available inventory is zero or negative after scaling, skip blockchain call
+            if available_inventory_int <= 0:
+                 console.print(f"[{Colors.YELLOW}]execute_fair_allocation (Drug {drug_id}): Scaled available inventory is zero or less ({available_inventory_int}), skipping blockchain call.[/]")
+                 return {r_id: 0.0 for r_id in region_ids} # Return zero allocations
+
+            function_call = self.contract.functions.executeFairAllocation(
+                drug_id, region_ids, requested_amounts_int, available_inventory_int
+            )
+
+            # --- Simulate the call() first to get the return value for the simulation ---
+            allocated_amounts_int = None
+            try:
+                console.print(f"[{Colors.DIM}]Simulating executeFairAllocation call for Drug {drug_id}...[/]", style=Colors.BLOCKCHAIN)
+                # Determine address to use for simulation call (sender might matter for some contract logic)
+                simulated_from_address = self.account.address if self.account else self.w3.eth.accounts[0] if self.w3.eth.accounts else None
+                if simulated_from_address is None:
+                    console.print(f"[{Colors.YELLOW}]Warning: No account available for simulating call, allocation may fail if contract requires sender.[/]")
+                    # Try calling without a 'from' address if no accounts are available
+                    allocated_amounts_int = function_call.call()
+                else:
+                    allocated_amounts_int = function_call.call({'from': simulated_from_address})
+                console.print(f"[{Colors.DIM}]Contract call simulation returned (int): {allocated_amounts_int}[/]", style=Colors.BLOCKCHAIN)
+            except ContractLogicError as sim_error:
+                 console.print(f"[{Colors.RED}]Contract logic error during executeFairAllocation simulation (call): {sim_error}[/]")
+                 return None # Indicate failure to simulation caller
+            except Exception as sim_e:
+                 console.print(f"[{Colors.RED}]Error during executeFairAllocation simulation (call): {sim_e}[/]")
+                 return None # Indicate failure
+
+            # Convert simulated integer amounts back to floats for the return value
+            simulated_allocations_float = {
+                region_ids[i]: float(alloc) / self.SCALE_FACTOR
+                for i, alloc in enumerate(allocated_amounts_int)
             }
 
-    def record_allocation(self, drug_id, region_id, amount):
-        """Record a drug allocation on the blockchain. Sent by Manufacturer."""
-        print(f"[Blockchain Call] recordAllocation(drug={drug_id}, region={region_id}, amount={amount})")
-        # Manufacturer needs to send this transaction
-        sender_address = self.manufacturer_address
-        function_call = self.contract.functions.recordAllocation(
-            int(drug_id), int(region_id), int(amount) # Ensure correct types
-        )
-        result = self._send_transaction(function_call, sender_address)
-        print(f"  [Blockchain Result] recordAllocation: {result['status']}")
-        return result
+            # --- Now send the actual transaction to change state / emit events ---
+            # This runs *after* getting the simulated result needed for the Python environment flow.
+            # We log the result but the simulation uses the value from call().
+            if self.account: # Only send if a private key/account is configured
+                tx_result = self._send_transaction(function_call)
+                if not tx_result or tx_result.get('status') != 'success':
+                     console.print(f"[{Colors.YELLOW}]Warning: Transaction submission for executeFairAllocation (Drug {drug_id}) failed or was not successful. Allocation based on simulation call result.[/]")
+                     # Continue with the simulated result anyway
+            else:
+                 console.print(f"[{Colors.YELLOW}]Skipping actual transaction for executeFairAllocation (Drug {drug_id}): No private key.[/]")
 
-    def calculate_optimal_allocation(self, drug_id, region_requests, available_inventory):
-        """Calculate optimal allocation using the smart contract (view function)."""
-        print(f"[Blockchain Call] calculateAllocation(drug={drug_id}, requests={region_requests}, available={available_inventory}) - View")
-        try:
-            region_ids = []
-            requested_amounts = []
-            # Keys in region_requests might be str or int, ensure they are ints for contract
-            for region_id, amount in region_requests.items():
-                region_ids.append(int(region_id))
-                requested_amounts.append(int(amount)) # Amount should likely be int for contract
+            return simulated_allocations_float
 
-            # This is a view function, no transaction needed, just .call()
-            allocations = self.contract.functions.calculateAllocation(
-                int(drug_id), region_ids, requested_amounts, int(available_inventory)
-            ).call() # No 'from' needed for view calls
-
-            result = {}
-            for i, region_id in enumerate(region_ids):
-                result[region_id] = allocations[i] # Contract returns uint[], keep as number
-
-            print(f"  [Blockchain Result] calculateAllocation Result: {result}")
-            return result
         except Exception as e:
-            print(f"  [Blockchain ERROR] Error calling calculateAllocation view function: {e}")
-            # Fallback logic remains the same
-            result = {}
-            num_regions = len(region_requests)
-            if num_regions > 0 and available_inventory > 0:
-                equal_amount = available_inventory / num_regions
-                for region_id_key, req_amount in region_requests.items():
-                     # Cap allocation at requested amount and ensure non-negative
-                     result[int(region_id_key)] = max(0, min(equal_amount, req_amount))
-            else: # No regions or no inventory
-                 for region_id_key in region_requests:
-                      result[int(region_id_key)] = 0
-            print(f"  [Blockchain Fallback] Falling back to equal distribution: {result}")
-            return result
+            # Catch errors during preparation (e.g., integer conversion)
+            console.print(f"[{Colors.RED}]Error preparing/calling executeFairAllocation for Drug {drug_id}: {e}[/]")
+            # console.print_exception(show_locals=False)
+            return None # Indicate failure
 
+    # --- Read Methods ---
 
-    def update_case_data(self, region_id, new_cases):
-        """Update case data for a region. Sent by Distributor/Hospital for their region, or Owner."""
-        print(f"[Blockchain Call] updateCases(region={region_id}, cases={new_cases})")
+    def _read_contract(self, function_call, *args) -> Optional[Any]:
+        """Helper for reading data with retries."""
+        max_retries = 3
+        base_delay = 0.5
+        for attempt in range(max_retries):
+            try:
+                # Use the function call object directly
+                result = function_call(*args).call()
+                return result
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    console.print(f"[{Colors.YELLOW}]Retrying read operation ({function_call.fn_name}) after error (Attempt {attempt+1}/{max_retries}): {e}. Waiting {delay:.1f}s...[/]")
+                    time.sleep(delay)
+                else:
+                    console.print(f"[bold {Colors.RED}]Error reading contract function '{function_call.fn_name}' after {max_retries} attempts: {e}[/]")
+                    return None # Return None after final attempt fails
 
-        # Determine who *should* send based on the region
-        # In the simulation, the Distributor/Hospital agent for region_id would trigger this.
-        # Here, we map region_id back to the appropriate address.
-        sender_address = self.distributor_addresses.get(region_id) # Prefer distributor
-        if not sender_address:
-            sender_address = self.hospital_addresses.get(region_id) # Fallback to hospital
-        if not sender_address:
-             # If no specific actor found (e.g., region ID invalid or not mapped), fallback to owner
-             print(f"  [Blockchain Warning] No specific actor found for region {region_id} case update. Using owner address.")
-             sender_address = self.owner_address
-
-        # Ensure address is checksummed before use
-        sender_address = self.w3.to_checksum_address(sender_address)
-
-        function_call = self.contract.functions.updateCases(
-            int(region_id), int(new_cases) # Ensure correct types
-        )
-        result = self._send_transaction(function_call, sender_address)
-        print(f"  [Blockchain Result] updateCases: {result['status']}")
-        return result
-
-    def print_contract_state(self):
-        """Print the current state of the contract."""
+    def get_regional_case_count(self, region_id: int) -> Optional[int]:
+        """Reads the latest case count for a region from the contract with retries."""
         try:
-            print("\n--- Contract State ---")
-            # Get drug count
-            drug_count = self.contract.functions.drugCount().call()
-            print(f"Drug count: {drug_count}")
-
-            # Get drug details
-            print("\nDrugs:")
-            for i in range(drug_count):
-                # Using the ABI definition: returns (string name, uint8 criticality, uint cap, uint base, bool active)
-                drug = self.contract.functions.drugs(i).call()
-                criticality_str = ["Low", "Medium", "High", "Critical"][drug[1]] # Convert enum index
-                print(f"  Drug {i}: Name='{drug[0]}', Crit={criticality_str}({drug[1]}), Cap={drug[2]}, Base={drug[3]}, Active={drug[4]}")
-
-            # Get region count
-            region_count = self.contract.functions.regionCount().call()
-            print(f"\nRegion count: {region_count}")
-
-            # Get region details
-            print("\nRegions:")
-            for i in range(region_count):
-                # Using the ABI definition: returns (string name, string type, uint pop, uint cases, bool active)
-                region = self.contract.functions.regions(i).call()
-                print(f"  Region {i}: Name='{region[0]}', Type='{region[1]}', Pop={region[2]}, Cases={region[3]}, Active={region[4]}")
-
-            # Get allocation history for each drug
-            print("\nAllocation History:")
-            total_allocs = 0
-            for i in range(drug_count):
-                # Using the ABI definition: returns tuple(uint drugId, uint regionId, uint amount, uint timestamp)[]
-                history = self.contract.functions.getAllocationHistory(i).call()
-                total_allocs += len(history)
-                print(f"  Drug {i} ('{self.contract.functions.drugs(i).call()[0]}'): {len(history)} allocations")
-                # Print only a few recent ones if history is long
-                max_to_print = 5
-                start_index = max(0, len(history) - max_to_print)
-                for j in range(start_index, len(history)):
-                    alloc = history[j]
-                    # Access tuple elements by index: alloc[0]=drugId, alloc[1]=regionId, alloc[2]=amount, alloc[3]=timestamp
-                    print(f"    - Region: {alloc[1]}, Amount: {alloc[2]}, Timestamp: {alloc[3]}")
-            print(f"Total allocations recorded across all drugs: {total_allocs}")
-            print("--- End Contract State ---")
-
-            return True
+            return self._read_contract(self.contract.functions.getRegionalCaseCount, region_id)
         except Exception as e:
-            print(f"Error printing contract state: {e}")
-            import traceback
-            traceback.print_exc() # Print full traceback for debugging
-            return False
+            # This catch is mostly for unexpected errors not caught by _read_contract
+            console.print(f"[{Colors.RED}]Unexpected error in get_regional_case_count setup for R{region_id}: {e}[/]")
+            return None
+
+    def get_drug_criticality(self, drug_id: int) -> Optional[int]:
+        """Reads the drug criticality value from the contract with retries."""
+        try:
+            return self._read_contract(self.contract.functions.getDrugCriticality, drug_id)
+        except Exception as e:
+            console.print(f"[{Colors.RED}]Unexpected error in get_drug_criticality setup for D{drug_id}: {e}[/]")
+            return None
+
+    def get_contract_owner(self) -> Optional[str]:
+        """Reads the owner address from the contract with retries."""
+        try:
+            return self._read_contract(self.contract.functions.owner) # No arguments needed for owner()
+        except Exception as e:
+            console.print(f"[{Colors.RED}]Unexpected error in get_contract_owner setup: {e}[/]")
+            return None
+
+    # --- Utility ---
+
+    def print_contract_state(self, num_regions: int = 5, num_drugs: int = 3):
+        """Queries and prints some key states from the contract for debugging."""
+        console.rule(f"[{Colors.BLOCKCHAIN}]Querying Final Blockchain State[/]")
+        try:
+            owner = self.get_contract_owner()
+            console.print(f"Contract Owner: {owner if owner else '[red]Error Reading[/]'}")
+
+            console.print("\n[bold]Regional Case Counts:[/bold]")
+            for r_id in range(num_regions):
+                # Add slight delay between reads if node rate limits aggressively
+                # time.sleep(0.1)
+                cases = self.get_regional_case_count(r_id)
+                console.print(f"  Region {r_id}: {cases if cases is not None else f'[{Colors.RED}]Read Error[/]'}")
+
+            console.print("\n[bold]Drug Criticalities:[/bold]")
+            for d_id in range(num_drugs):
+                 # time.sleep(0.1)
+                 crit = self.get_drug_criticality(d_id)
+                 console.print(f"  Drug {d_id}: {crit if crit is not None else f'[{Colors.RED}]Read Error[/]'}")
+
+        except Exception as e:
+            console.print(f"[{Colors.RED}]Error querying final contract state: {e}[/]")
+        console.rule()
+
+# --- END OF FILE src/blockchain/interface.py ---
