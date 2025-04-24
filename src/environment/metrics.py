@@ -8,6 +8,11 @@ import pandas as pd
 import seaborn as sns
 import os
 
+try:
+    from src.blockchain.interface import BlockchainInterface
+except ImportError:
+    BlockchainInterface = None
+
 
 def track_service_levels(environment):
     """Track percentage of demand met over time."""
@@ -306,3 +311,115 @@ def visualize_warehouse_flow(environment, output_folder="output", console = None
          console.print(f"[bold green]✓ Warehouse flow visualization saved to '{output_path}'[/]")
     except Exception as e:
          console.print(f"[bold red]Error saving warehouse flow visualization: {e}[/]")
+
+
+def visualize_blockchain_performance(
+    blockchain_interface: BlockchainInterface,
+    output_folder="output",
+    console=None
+    ):
+    """Visualize blockchain interaction performance metrics."""
+    if not blockchain_interface:
+        if console: console.print("[yellow]Blockchain interface not available for visualization.[/]")
+        return
+    output_path = os.path.join(output_folder, 'blockchain_performance.png')
+
+    # Get the raw data lists and summary metrics
+    bc_metrics = blockchain_interface.get_performance_metrics()
+    tx_latencies = blockchain_interface.tx_latencies
+    read_latencies = blockchain_interface.read_latencies
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10)) # Create a 2x2 grid
+
+    # --- Plot 1: Transaction Latency Distribution ---
+    ax = axes[0, 0]
+    if tx_latencies:
+        ax.hist(tx_latencies, bins=30, color='skyblue', edgecolor='black', alpha=0.7)
+        ax.axvline(bc_metrics['tx_latency_avg_s'], color='red', linestyle='dashed', linewidth=1, label=f"Avg: {bc_metrics['tx_latency_avg_s']:.3f}s")
+        ax.axvline(np.median(tx_latencies), color='orange', linestyle='dotted', linewidth=1, label=f"Median: {np.median(tx_latencies):.3f}s")
+        ax.axvline(bc_metrics['tx_latency_p95_s'], color='purple', linestyle='dashdot', linewidth=1, label=f"P95: {bc_metrics['tx_latency_p95_s']:.3f}s")
+        ax.set_title('Transaction Receipt Latency Distribution')
+        ax.set_xlabel('Latency (seconds)')
+        ax.set_ylabel('Frequency')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    else:
+        ax.text(0.5, 0.5, 'No Transaction Data', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+        ax.set_title('Transaction Receipt Latency Distribution')
+
+    # --- Plot 2: Read Call Latency Distribution ---
+    ax = axes[0, 1]
+    if read_latencies:
+        ax.hist(read_latencies, bins=30, color='lightgreen', edgecolor='black', alpha=0.7)
+        ax.axvline(bc_metrics['read_latency_avg_s'], color='red', linestyle='dashed', linewidth=1, label=f"Avg: {bc_metrics['read_latency_avg_s']:.3f}s")
+        ax.axvline(np.median(read_latencies), color='orange', linestyle='dotted', linewidth=1, label=f"Median: {np.median(read_latencies):.3f}s")
+        ax.axvline(bc_metrics['read_latency_p95_s'], color='purple', linestyle='dashdot', linewidth=1, label=f"P95: {bc_metrics['read_latency_p95_s']:.3f}s")
+        ax.set_title('Read Call Latency Distribution')
+        ax.set_xlabel('Latency (seconds)')
+        ax.set_ylabel('Frequency')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    else:
+        ax.text(0.5, 0.5, 'No Read Data', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+        ax.set_title('Read Call Latency Distribution')
+
+    # --- Plot 3: Transaction Outcomes ---
+    ax = axes[1, 0]
+    tx_total = bc_metrics['tx_sent_count']
+    if tx_total > 0:
+        tx_success = bc_metrics['tx_success_count']
+        tx_failed = bc_metrics['tx_failure_count']
+        labels = ['Succeeded', 'Failed']
+        counts = [tx_success, tx_failed]
+        colors = ['mediumseagreen', 'salmon']
+        bars = ax.barh(labels, counts, color=colors, edgecolor='black')
+        ax.set_title(f'Transaction Outcomes (Total Sent: {tx_total})')
+        ax.set_xlabel('Count')
+        # Add text labels
+        for bar in bars:
+            width = bar.get_width()
+            ax.text(width + (0.01 * tx_total), bar.get_y() + bar.get_height()/2.,
+                    f'{int(width)}', va='center')
+        # Add success rate text
+        success_rate_str = f"{bc_metrics['tx_success_rate']:.1f}% Success" if isinstance(bc_metrics['tx_success_rate'], float) else "N/A"
+        ax.text(0.95, 0.05, success_rate_str, ha='right', va='bottom', transform=ax.transAxes, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+
+    else:
+        ax.text(0.5, 0.5, 'No Transactions Sent', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+        ax.set_title('Transaction Outcomes')
+
+    # --- Plot 4: Read Call Outcomes ---
+    ax = axes[1, 1]
+    read_total = bc_metrics['read_call_count']
+    if read_total > 0:
+        read_errors = bc_metrics['read_error_count']
+        read_success = read_total - read_errors
+        labels = ['Succeeded', 'Failed (Error)']
+        counts = [read_success, read_errors]
+        colors = ['cornflowerblue', 'lightgrey']
+        bars = ax.barh(labels, counts, color=colors, edgecolor='black')
+        ax.set_title(f'Read Call Outcomes (Total Calls: {read_total})')
+        ax.set_xlabel('Count')
+        # Add text labels
+        for bar in bars:
+            width = bar.get_width()
+            ax.text(width + (0.01 * read_total), bar.get_y() + bar.get_height()/2.,
+                    f'{int(width)}', va='center')
+        # Add success rate text
+        success_rate_str = f"{bc_metrics['read_success_rate']:.1f}% Success" if isinstance(bc_metrics['read_success_rate'], float) else "N/A"
+        ax.text(0.95, 0.05, success_rate_str, ha='right', va='bottom', transform=ax.transAxes, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+    else:
+        ax.text(0.5, 0.5, 'No Read Calls Made', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+        ax.set_title('Read Call Outcomes')
+
+
+    plt.suptitle("Blockchain Interaction Performance Summary", fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to make room for suptitle
+
+    try:
+        plt.savefig(output_path); plt.close(fig) # Close the specific figure
+        if console: console.print(f"[bold green]✓ Blockchain performance visualization saved to '{output_path}'[/]")
+    except Exception as e:
+         if console: console.print(f"[bold red]Error saving blockchain performance visualization: {e}[/]")
+
+

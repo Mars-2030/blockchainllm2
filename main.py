@@ -30,7 +30,7 @@ from src.scenario.visualizer import (
     visualize_sir_simulation
 )
 from src.environment.supply_chain import PandemicSupplyChainEnvironment
-from src.environment.metrics import track_service_levels, visualize_service_levels, visualize_performance, visualize_inventory_levels
+from src.environment.metrics import track_service_levels, visualize_service_levels, visualize_performance, visualize_inventory_levels, visualize_blockchain_performance
 from src.tools import PandemicSupplyChainTools # Import the class
 from src.llm.openai_integration import OpenAILLMIntegration
 from src.agents.manufacturer import create_openai_manufacturer_agent
@@ -579,6 +579,51 @@ if __name__ == "__main__":
         console.print("[bold red]Simulation did not complete successfully. No results to display.[/]")
 
     # --- PRINT FINAL BLOCKCHAIN STATE ---
+       # --- (DISPLAY BLOCKCHAIN PERFORMANCE METRICS ---
+    if actual_use_blockchain_flag and blockchain_interface_instance:
+        console.print(Panel("[bold white]Blockchain Performance Metrics[/]", border_style=Colors.BLOCKCHAIN, expand=False))
+        bc_metrics = blockchain_interface_instance.get_performance_metrics()
+
+        perf_table = Table(title="Blockchain Interaction Summary", show_header=True, header_style="bold magenta", box=box.ROUNDED)
+        perf_table.add_column("Metric", style="cyan", min_width=25)
+        perf_table.add_column("Value", style="white", min_width=20)
+
+        # Transactions
+        perf_table.add_row("[bold]Transactions[/]", "")
+        perf_table.add_row("  Attempted Count", str(bc_metrics['tx_sent_count']))
+        perf_table.add_row("  Successful Count", str(bc_metrics['tx_success_count']))
+        perf_table.add_row("  Failed Count", str(bc_metrics['tx_failure_count']))
+        perf_table.add_row("  Success Rate", f"{bc_metrics['tx_success_rate']:.2f}%" if isinstance(bc_metrics['tx_success_rate'], float) else bc_metrics['tx_success_rate'])
+        perf_table.add_row("  Avg. Latency (s)", f"{bc_metrics['tx_latency_avg_s']:.4f}")
+        perf_table.add_row("  Max Latency (s)", f"{bc_metrics['tx_latency_max_s']:.4f}")
+        perf_table.add_row("  P95 Latency (s)", f"{bc_metrics['tx_latency_p95_s']:.4f}")
+        perf_table.add_row("  Total Gas Used", str(bc_metrics['total_gas_used']))
+        perf_table.add_row("  Avg Gas / Success Tx", f"{bc_metrics['avg_gas_per_successful_tx']:.0f}")
+        perf_table.add_row("  Last Tx Error", str(bc_metrics['last_tx_error']) if bc_metrics['last_tx_error'] else "None")
+
+        # Reads
+        perf_table.add_row("[bold]Reads (Calls)[/]", "")
+        perf_table.add_row("  Attempted Count", str(bc_metrics['read_call_count']))
+        perf_table.add_row("  Failed Count", str(bc_metrics['read_error_count']))
+        perf_table.add_row("  Success Rate", f"{bc_metrics['read_success_rate']:.2f}%" if isinstance(bc_metrics['read_success_rate'], float) else bc_metrics['read_success_rate'])
+        perf_table.add_row("  Avg. Latency (s)", f"{bc_metrics['read_latency_avg_s']:.4f}")
+        perf_table.add_row("  Max Latency (s)", f"{bc_metrics['read_latency_max_s']:.4f}")
+        perf_table.add_row("  P95 Latency (s)", f"{bc_metrics['read_latency_p95_s']:.4f}")
+        perf_table.add_row("  Last Read Error", str(bc_metrics['last_read_error']) if bc_metrics['last_read_error'] else "None")
+
+        console.print(perf_table)
+
+        # --- CALL BLOCKCHAIN VISUALIZATION ---
+        visualize_blockchain_performance(
+            blockchain_interface=blockchain_interface_instance,
+            output_folder=output_folder,
+            console=console
+        )
+        # -----------------------------------------
+    elif args.use_blockchain:
+        # Case where blockchain was requested but failed to initialize
+        console.print(Panel("[yellow]Blockchain Performance Metrics Not Available (Initialization Failed)[/]", border_style="yellow", expand=False))
+    
     # Use the actual_use_blockchain_flag and the instance
     if actual_use_blockchain_flag and blockchain_interface_instance:
         console.print("\n[bold cyan]Querying Final Blockchain State...[/]")
