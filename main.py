@@ -13,7 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 import os # Added for path joining
-from typing import Optional # For type hinting
+from typing import Optional, Dict # For type hinting
 
 # Updated import order to match config first
 from config import (
@@ -36,7 +36,11 @@ from src.llm.openai_integration import OpenAILLMIntegration
 from src.agents.manufacturer import create_openai_manufacturer_agent
 from src.agents.distributor import create_openai_distributor_agent
 from src.agents.hospital import create_openai_hospital_agent
-from src.blockchain.interface import BlockchainInterface
+# Import BlockchainInterface only if needed, handle potential import error
+try:
+    from src.blockchain.interface import BlockchainInterface
+except ImportError:
+    BlockchainInterface = None # Allows running without blockchain dependencies
 
 
 import datetime
@@ -46,13 +50,15 @@ import datetime
 def run_openai_pandemic_simulation(
     console: Console,
     openai_api_key: str,
-    num_regions: int = 5,
+    num_regions: int = 3, # Default back to 3 for common use
     num_drugs: int = 3,
-    simulation_days: int = 180,
+    simulation_days: int = 180, # Increased default simulation length
     pandemic_severity: float = 0.8,
     disruption_probability: float = 0.1,
-    warehouse_release_delay: int = 3,
-    allocation_batch_frequency: int = 7,
+    # --- Use Consistent Default Warehouse Delay ---
+    warehouse_release_delay: int = 1, # Default: 1 day delay
+    # --------------------------------------------
+    allocation_batch_frequency: int = 1, # Default: Daily allocation
     model_name: str = "gpt-3.5-turbo",
     visualize: bool = True,
     verbose: bool = True,
@@ -136,47 +142,68 @@ def run_openai_pandemic_simulation(
         current_sim_day = day_index + 1 # Actual simulation day number (1-based)
         console.rule(f"[bold cyan] Starting Day {current_sim_day}/{simulation_days} [/bold cyan]", style="cyan")
 
+        # --- (MODIFIED) UPDATE BLOCKCHAIN WITH CURRENT SIM CASES *BEFORE* DECISIONS ---
+        if use_blockchain and blockchain_interface:
+            # Get simulation cases for the START of the current day (index `day_index`)
+            # The environment's current_day is still `day_index` before the step()
+            sim_cases_today = environment.get_current_simulation_cases() # Uses environment.current_day which is day_index
+            if verbose: console.print(f"[{Colors.BLOCKCHAIN}]Updating Blockchain cases for Day {current_sim_day} (Based on Sim State at start of day): {sim_cases_today}[/]")
+            update_failed = False
+            for region_id, cases_int in sim_cases_today.items():
+                try:
+                    # Make the update call
+                    tx_result = blockchain_interface.update_regional_case_count(
+                        region_id=int(region_id),
+                        cases=cases_int
+                    )
+                    # Log failures but continue simulation
+                    if tx_result is None or tx_result.get('status') != 'success':
+                        console.print(f"[{Colors.BLOCKCHAIN}][yellow]BC Tx Failed (Update Cases R{region_id} Day {current_sim_day}): {tx_result.get('error', 'Unknown BC error') if tx_result else 'Comm error'}[/]")
+                        update_failed = True
+                except Exception as e:
+                    console.print(f"[{Colors.BLOCKCHAIN}][red]BC Error calling update_case_data for R{region_id} Day {current_sim_day}: {e}[/]")
+                    update_failed = True
+
+            # Optional: Handle critical failures if needed
+            # if update_failed:
+            #     console.print(f"[bold red]CRITICAL: Blockchain update failed for one or more regions on Day {current_sim_day}. Simulation integrity potentially compromised.[/]")
+            #     # Decide whether to continue or stop based on simulation requirements
+            #     # break # Example: Stop simulation on critical failure
+        # ----------------------------------------------------------------------
+
         # --- Print Daily Epidemic State (if verbose) ---
-        # This table now shows internal simulation cases vs blockchain cases vs projected demand
+        # Table now shows Sim cases for the current day vs. BC cases (which should reflect the update just performed)
         if verbose:
             epi_table = Table(title=f"Epidemic State - Day {current_sim_day}", show_header=True, header_style="bold magenta", box=box.SIMPLE)
             epi_table.add_column("Region", style="cyan")
-            epi_table.add_column("Cases (Sim)", style="white", justify="right") # Internal Simulation Cases
-            # epi_table.add_column("Trend (7d)", style="yellow", justify="right") # Trend info removed from obs
-            epi_table.add_column("Proj.Demand(Sum)", style="magenta", justify="right") # Show Projected Demand Summary
+            epi_table.add_column("Cases (Sim)", style="white", justify="right") # Internal Simulation Cases for current day
+            epi_table.add_column("Proj.Demand(Sum)", style="magenta", justify="right") # Projected Demand based on current day
             if use_blockchain and blockchain_interface:
-                 epi_table.add_column("Cases (BC)", style=Colors.BLOCKCHAIN, justify="right")
+                 epi_table.add_column("Cases (BC)", style=Colors.BLOCKCHAIN, justify="right") # Cases on BC (should now match Sim)
 
             scenario = environment.scenario # Get scenario object
             num_regions_in_scenario = len(scenario.regions) # Use actual num regions from scenario
+
+            # Get simulation cases again for display consistency (should match what was sent to BC)
+            sim_cases_display = environment.get_current_simulation_cases()
 
             for r_id in range(num_regions_in_scenario):
                  region_name = scenario.regions[r_id].get("name", f"Region-{r_id+1}")
                  bc_cases_str = "[dim]N/A[/]" # Default if BC disabled or error
 
-                 # Get internal simulation state for comparison display
-                 if r_id in scenario.epidemic_curves:
-                      curve = scenario.epidemic_curves[r_id]
-                      # Use day_index (0-based) for curve access, check bounds
-                      current_idx = min(day_index, len(curve) - 1)
-                      if current_idx >= 0 and len(curve) > current_idx:
-                           sim_cases = curve[current_idx]
-                           sim_cases_str = f"{sim_cases:.0f}"
-                           # Calculate projected demand for this region (sum across drugs for display)
-                           #proj_demand_region = sum(scenario.get_daily_drug_demand(current_day=day_index, region_id=r_id, drug_id=d_id) for d_id in range(environment.num_drugs))
-                           proj_demand_region = sum(scenario.get_daily_drug_demand(day=day_index, region_id=r_id, drug_id=d_id) for d_id in range(environment.num_drugs)) # Use day= instead of current_day=
-                           proj_demand_str = f"{proj_demand_region:.0f}"
-                      else:
-                          sim_cases_str = "[dim]N/A[/]"; proj_demand_str = "[dim]N/A[/]"
-                 else:
-                       sim_cases_str = "[dim]No Data[/]"; proj_demand_str = "[dim]No Data[/]"
+                 sim_cases = sim_cases_display.get(r_id, 0)
+                 sim_cases_str = f"{sim_cases:.0f}"
 
-                 # Query blockchain if enabled
+                 # Calculate projected demand using current day index
+                 proj_demand_region = sum(scenario.get_daily_drug_demand(day=day_index, region_id=r_id, drug_id=d_id) for d_id in range(environment.num_drugs))
+                 proj_demand_str = f"{proj_demand_region:.0f}"
+
+                 # Query blockchain *after* the update attempt
                  if use_blockchain and blockchain_interface:
                      try:
-                          # Note: This is a read operation for display, agent reads separately via tool
+                          # Note: This is a read operation for display, agents read separately via tool
                           bc_cases = blockchain_interface.get_regional_case_count(r_id)
-                          bc_cases_str = f"{bc_cases}" if bc_cases is not None else "[red]Error[/]"
+                          bc_cases_str = f"{bc_cases}" if bc_cases is not None else "[red]Read Error[/]"
                      except Exception as e:
                           bc_cases_str = "[red]QueryErr[/]"
 
@@ -191,6 +218,7 @@ def run_openai_pandemic_simulation(
 
 
         # --- Get Decisions ---
+        # Agents make decisions based on observations and potentially querying the *updated* blockchain state
         all_actions = {}
         manu_decision = {}; dist_orders = {}; dist_allocs = {}; hosp_orders = {}
 
@@ -275,8 +303,7 @@ def run_openai_pandemic_simulation(
         # --- Step Environment ---
         try:
             # Environment step now receives actions based on agent decisions
-            # If blockchain is used, the environment's _calculate_fair_allocation
-            # will call the blockchain, overriding the manufacturer's requested amounts.
+            # The _process_patient_demand method inside step() no longer updates the blockchain.
             observations, rewards, done, info = environment.step(all_actions)
         except Exception as e:
             console.print(f"[bold red]CRITICAL ERROR during environment step on day {current_sim_day}: {e}[/]")
@@ -290,12 +317,15 @@ def run_openai_pandemic_simulation(
             wh_inv = info.get('warehouse_inventory', {})
             manu_inv = info.get('manufacturer_inventory', {})
             pending_str = ", PendingAlloc: Yes" if info.get('pending_allocations') else ""
-            console.print(f"Day {info['current_day']} End: WH Inv:{sum(wh_inv.values()):.0f}, Manu Inv:{sum(float(v) for v in manu_inv.values()):.0f}{pending_str}")
+            # Manu Inv needs safe summing
+            manu_inv_sum = sum(float(v) for v in manu_inv.values() if isinstance(v, (int, float)))
+            console.print(f"Day {info['current_day']} End: WH Inv:{sum(wh_inv.values()):.0f}, Manu Inv:{manu_inv_sum:.0f}{pending_str}")
             # Check for significant stockouts
-            # Stockout history index needs care, day just ended is current_day - 1
-            day_stockouts = sum(s['unfulfilled'] for s in environment.stockout_history if s['day']==info['current_day']-1)
+            # Stockout history index needs care, day just ended is current_sim_day
+            day_stockouts_list = [s['unfulfilled'] for s in environment.stockout_history if isinstance(s, dict) and s.get('day') == day_index] # Use day_index (0-based) for history
+            day_stockouts = sum(day_stockouts_list)
             if day_stockouts > 0:
-                console.print(f"[{Colors.STOCKOUT}]Stockouts recorded for day {info['current_day']-1}: {day_stockouts:.1f} units unfulfilled.[/]")
+                console.print(f"[{Colors.STOCKOUT}]Stockouts recorded for day {current_sim_day}: {day_stockouts:.1f} units unfulfilled.[/]")
 
         # Record metrics history (ensure keys exist)
         metrics_history["stockouts"].append(info.get("stockouts", {}))
@@ -316,6 +346,7 @@ def run_openai_pandemic_simulation(
     final_impact = environment.patient_impact
     service_levels = track_service_levels(environment)
 
+    # Add scenario info to results for better reporting context
     results = {
         "total_stockouts": final_stockouts,
         "total_unfulfilled_demand": final_unfulfilled,
@@ -324,7 +355,9 @@ def run_openai_pandemic_simulation(
         "service_levels": service_levels,
         "total_demand": environment.total_demand,
         "scenario_regions": scenario_generator.regions,
-        "scenario_drugs": scenario_generator.drugs
+        "scenario_drugs": scenario_generator.drugs,
+        "config_warehouse_delay": environment.warehouse_release_delay,
+        "config_allocation_frequency": environment.allocation_batch_frequency
     }
 
     # Generate visualizations if requested
@@ -334,9 +367,15 @@ def run_openai_pandemic_simulation(
             visualize_epidemic_curves(scenario_generator, output_folder, console=console)
             visualize_drug_demand(scenario_generator, output_folder, console=console)
             visualize_disruptions(scenario_generator, output_folder, console=console)
+            # Visualize SIR components combined plot
             visualize_sir_components(scenario_generator, output_folder, console=console)
+            # Visualize individual region SIR details (up to 3 regions)
             for region_id in range(min(3, num_regions)):
-                visualize_sir_simulation(scenario_generator, region_id, output_folder, console=console)
+                 if scenario_generator.epidemic_curves.get(region_id) is not None: # Check if curve exists
+                    visualize_sir_simulation(scenario_generator, region_id, output_folder, console=console)
+                 else:
+                    console.print(f"[yellow]Skipping SIR detail plot for Region {region_id}: No epidemic curve data.[/]")
+
             visualize_performance(environment, output_folder, console=console)
             visualize_inventory_levels(environment, output_folder, console=console)
             visualize_service_levels(environment, output_folder, console=console)
@@ -354,15 +393,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run pandemic supply chain simulation with OpenAI agents")
     parser.add_argument("--regions", type=int, default=3, help="Number of regions")
     parser.add_argument("--drugs", type=int, default=3, help="Number of drugs")
-    parser.add_argument("--days", type=int, default=30, help="Simulation days")
+    parser.add_argument("--days", type=int, default=180, help="Simulation days") # Default increased
     parser.add_argument("--severity", type=float, default=0.8, help="Pandemic severity (0-1)")
     parser.add_argument("--disrupt-prob", type=float, default=0.1, help="Base disruption probability factor")
     parser.add_argument("--model", type=str, default="gpt-3.5-turbo", help="OpenAI model name (e.g., gpt-3.5-turbo, gpt-4-turbo-preview, gpt-4o)")
     parser.add_argument("--no-viz", action="store_false", dest="visualize", help="Disable visualizations")
     parser.add_argument("--quiet", action="store_false", dest="verbose", help="Less verbose output")
     parser.add_argument("--no-colors", action="store_false", dest="use_colors", help="Disable colored output")
-    parser.add_argument("--folder", type=str, default="output", help="Folder for simulation output")
+    parser.add_argument("--folder", type=str, default="output", help="Base folder for simulation output")
+    # --- Use Consistent Warehouse Delay ---
     parser.add_argument("--warehouse-delay", type=int, default=1, help="Warehouse release delay (days)")
+    # -------------------------------------
     parser.add_argument("--allocation-batch", type=int, default=1, help="Allocation batch frequency (days, 1=daily)")
     parser.add_argument("--use-blockchain", action="store_true", default=False, help="Enable blockchain integration")
 
@@ -370,7 +411,8 @@ if __name__ == "__main__":
 
     if not args.use_colors: console.no_color = True
 
-    output_folder_path = f"{args.folder}_{timestamp}_regions{args.regions}_drug{args.drugs}_days{args.days}"
+    # Create timestamped output folder
+    output_folder_path = f"{args.folder}_{timestamp}_regions{args.regions}_drugs{args.drugs}_days{args.days}"
     if args.use_blockchain: output_folder_path += "_blockchain"
     console.print(Panel("[bold white]🦠 PANDEMIC SUPPLY CHAIN SIMULATION (using OpenAI) 🦠[/]", border_style="blue", expand=False, padding=(1,2)))
 
@@ -404,7 +446,7 @@ if __name__ == "__main__":
     if args.use_blockchain:
         console.print("\n[bold cyan]Attempting Blockchain Integration...[/]")
         if BlockchainInterface is None:
-             console.print("[bold red]❌ Blockchain support not available (missing dependencies?). Halting.[/]")
+             console.print("[bold red]❌ Blockchain support not available (missing dependencies like web3?). Halting.[/]")
              exit(1)
         if not check_blockchain_config(): # Uses function from config.py
              console.print("[bold red]❌ Blockchain configuration incomplete in .env or ABI file missing. Halting.[/]")
@@ -525,10 +567,11 @@ if __name__ == "__main__":
         rating = "N/A"; rating_color="white"
         if service_levels: # Base rating on average service level
              avg_service = np.mean([item["service_level"] for item in service_levels])
-             # Adjusted rating thresholds
-             if avg_service >= 95 and total_impact < (50 * args.days): rating, rating_color = "Excellent", "green"
-             elif avg_service >= 90 and total_impact < (200 * args.days): rating, rating_color = "Good", "cyan"
-             elif avg_service >= 80 and total_impact < (1000 * args.days): rating, rating_color = "Fair", "yellow"
+             # Adjusted rating thresholds considering impact
+             total_impact = sum(results["patient_impact"].values())
+             if avg_service >= 98 and total_impact < (25 * args.days): rating, rating_color = "Excellent", "green"
+             elif avg_service >= 90 and total_impact < (100 * args.days): rating, rating_color = "Good", "cyan"
+             elif avg_service >= 80 and total_impact < (500 * args.days): rating, rating_color = "Fair", "yellow"
              else: rating, rating_color = "Poor", "red"
         console.print(f"\n[bold]Overall Supply Chain Performance:[/] [{rating_color}]{rating}[/]")
 

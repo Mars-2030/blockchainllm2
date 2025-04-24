@@ -75,9 +75,17 @@ class PandemicScenarioGenerator:
             elif criticality == "Medium": base_demand = np.random.uniform(10, 20)
             else: base_demand = np.random.uniform(1, 10) # Low
             # Production capacities from code15
-            if criticality == "Critical": base_production = np.random.uniform(150000, 300000)
-            elif criticality == "High": base_production = np.random.uniform(50000, 150000)
-            else: base_production = np.random.uniform(25000, 50000)
+            # --- ADJUSTED Production Capacities (Interpreted as DAILY) ---
+            # Note: Assuming 'base_production' is used as daily capacity limit
+            # These values should be high enough to handle surges but not infinite.
+            if criticality == "Critical":
+                 # Daily capacity significantly higher than peak regional daily demand
+                 base_production = np.random.uniform(15000, 30000) # WAS: 150k-300k
+            elif criticality == "High":
+                 base_production = np.random.uniform(5000, 15000)  # WAS: 50k-150k
+            else: # Medium/Low
+                 base_production = np.random.uniform(2500, 5000)   # WAS: 25k-50k
+            # -------------------------------------------------------------
             drugs.append({
                 "id": i, "name": f"Drug-{i+1}", "criticality": criticality,
                 "criticality_value": 4 - criticality_levels.index(criticality),
@@ -279,7 +287,12 @@ class PandemicScenarioGenerator:
         active_disruptions = [d for d in self.disruptions if d["type"] == "manufacturing" and d["drug_id"] == drug_id and d["start_day"] <= day <= d["end_day"]]
         capacity_multiplier = 1.0
         for disruption in active_disruptions: capacity_multiplier *= (1 - disruption["severity"])
-        return base_capacity * capacity_multiplier
+        # return base_capacity * 
+        return max(0.0, base_capacity * capacity_multiplier)         # Ensure capacity is not negative
+
+
+
+
 
     def get_transportation_capacity(self, day: int, region_id: int) -> float:
         region = self.regions[region_id]; base_capacity = 1.0
