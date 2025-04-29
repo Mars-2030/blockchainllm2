@@ -47,9 +47,9 @@ import datetime
 
 # Create rich console is now done in config.py
 
-def run_openai_pandemic_simulation(
+def run_pandemic_simulation(
     console: Console,
-    openai_api_key: str,
+    openai_api_key: Optional[str],
     num_regions: int = 3, # Default back to 3 for common use
     num_drugs: int = 3,
     simulation_days: int = 180, # Increased default simulation length
@@ -65,14 +65,16 @@ def run_openai_pandemic_simulation(
     use_colors: bool = True,
     output_folder: str = "output",
     blockchain_interface: Optional[BlockchainInterface] = None, # Allow None
-    use_blockchain: bool = False
+    use_blockchain: bool = False,
+    use_llm: bool = False
 ):
     """Run simulation with OpenAI-powered agents."""
 
     if not use_colors: console.no_color = True
-    sim_type = "OpenAI" + (" + Blockchain" if use_blockchain else "")
-    console.print(f"[bold]Initializing {sim_type}-powered pandemic supply chain simulation...[/]")
-
+    sim_mode = "LLM-Powered" if use_llm else "Rule-Based"
+    sim_type = f"{sim_mode}" + (" + Blockchain" if use_blockchain else "")
+    console.print(f"[bold]Initializing {sim_type} pandemic supply chain simulation...[/]")
+    
     # Create scenario and environment
     scenario_generator = PandemicScenarioGenerator(
         console=console, # Pass the console object
@@ -93,48 +95,59 @@ def run_openai_pandemic_simulation(
     # Create tools instance
     tools = PandemicSupplyChainTools()
 
-    # Create OpenAI integration
-    try:
-        openai_integration = OpenAILLMIntegration(openai_api_key, model_name, console=console )
-    except Exception as e:
-        console.print(f"[bold red]Failed to initialize OpenAI Integration: {e}. Aborting simulation.[/]")
-        return None # Indicate failure
-
+    # Conditional OpenAI Integration Initialization
+    openai_integration = None
+    if use_llm:
+        if not openai_api_key:
+            console.print("[bold red]Error: --use-llm flag requires OpenAI API key to be set in config or environment variables.[/]")
+            return None # Indicate failure
+        try:
+            openai_integration = OpenAILLMIntegration(openai_api_key, model_name, console=console)
+        except Exception as e:
+            console.print(f"[bold red]Failed to initialize OpenAI Integration: {e}. Aborting simulation.[/]")
+            return None # Indicate failure
+    else:
+        console.print("[yellow]Running in Rule-Based mode. OpenAI Integration skipped.[/]")
+        
     # Create agents, passing the blockchain interface instance if enabled
     manufacturer = create_openai_manufacturer_agent(
         tools=tools,
-        openai_integration=openai_integration,
-        num_regions=num_regions, # Pass num_regions
-        memory_length=10,
-        verbose=verbose,
-        console=console,
-        blockchain_interface=blockchain_interface if use_blockchain else None # Pass interface
-    )
-    distributors = [create_openai_distributor_agent(
-        region_id=r,
-        tools=tools,
-        openai_integration=openai_integration,
+        openai_integration=openai_integration, # Will be None if use_llm is False
         num_regions=num_regions,
         memory_length=10,
         verbose=verbose,
         console=console,
-        blockchain_interface=blockchain_interface if use_blockchain else None # Pass interface
+        blockchain_interface=blockchain_interface if use_blockchain else None,
+        use_llm=use_llm # Pass the flag
+    )
+    distributors = [create_openai_distributor_agent(
+        region_id=r,
+        tools=tools,
+        openai_integration=openai_integration, # Will be None if use_llm is False
+        num_regions=num_regions,
+        memory_length=10,
+        verbose=verbose,
+        console=console,
+        blockchain_interface=blockchain_interface if use_blockchain else None,
+        use_llm=use_llm # Pass the flag
         ) for r in range(num_regions)]
     hospitals = [create_openai_hospital_agent(
         region_id=r,
         tools=tools,
-        openai_integration=openai_integration,
+        openai_integration=openai_integration, # Will be None if use_llm is False
         memory_length=10,
         verbose=verbose,
         console=console,
-        blockchain_interface=blockchain_interface if use_blockchain else None # Pass interface
+        blockchain_interface=blockchain_interface if use_blockchain else None,
+        use_llm=use_llm # Pass the flag
         ) for r in range(num_regions)]
 
     # Reset environment and metrics
     observations = environment.reset() # Reset should handle initializing blockchain state if needed
     metrics_history = {"stockouts": [], "unfulfilled_demand": [], "patient_impact": []}
 
-    console.print(f"[bold]Running simulation for {simulation_days} days using {model_name}...[/]")
+    llm_model_info = f"using {model_name}" if use_llm else "using Rule-Based logic"
+    console.print(f"[bold]Running simulation for {simulation_days} days {llm_model_info}...[/]")
     start_time = time.time()
 
     # Simulation loop
@@ -406,16 +419,21 @@ if __name__ == "__main__":
     # -------------------------------------
     parser.add_argument("--allocation-batch", type=int, default=1, help="Allocation batch frequency (days, 1=daily)")
     parser.add_argument("--use-blockchain", action="store_true", default=False, help="Enable blockchain integration")
-
+    parser.add_argument("--use-llm", action="store_true", default=False, help="Enable LLM-powered agents (default: use rule-based logic)")
+    
     args = parser.parse_args()
 
     if not args.use_colors: console.no_color = True
 
     # Create timestamped output folder
     output_folder_path = f"{args.folder}_{timestamp}_regions{args.regions}_drugs{args.drugs}_days{args.days}"
+    if args.use_llm: output_folder_path += "_llm"
+    else: output_folder_path += "_rules"
     if args.use_blockchain: output_folder_path += "_blockchain"
-    console.print(Panel("[bold white]🦠 PANDEMIC SUPPLY CHAIN SIMULATION (using OpenAI) 🦠[/]", border_style="blue", expand=False, padding=(1,2)))
-
+    
+    sim_mode_title = "LLM-Powered" if args.use_llm else "Rule-Based"
+    console.print(Panel(f"[bold white]🦠 PANDEMIC SUPPLY CHAIN SIMULATION ({sim_mode_title}) 🦠[/]", border_style="blue", expand=False, padding=(1,2)))
+    
     # Config Table
     config_table = Table(title="Simulation Configuration", show_header=True, header_style="bold cyan", box=box.ROUNDED)
     config_table.add_column("Parameter", style="cyan"); config_table.add_column("Value", style="white")
@@ -424,7 +442,9 @@ if __name__ == "__main__":
     config_table.add_row("Disruption Probability Factor", f"{args.disrupt_prob:.2f}")
     config_table.add_row("Warehouse Delay", f"{args.warehouse_delay} days")
     config_table.add_row("Allocation Batch Frequency", f"{args.allocation_batch} days" if args.allocation_batch > 1 else "Daily")
-    config_table.add_row("LLM Model", args.model)
+    config_table.add_row("Agent Logic", "[cyan]LLM-Powered[/]" if args.use_llm else "[magenta]Rule-Based[/]")
+    if args.use_llm:
+        config_table.add_row("  LLM Model", args.model)
     config_table.add_row("Visualizations", "Enabled" if args.visualize else "Disabled")
     config_table.add_row("Verbose Output", "Enabled" if args.verbose else "Disabled")
     config_table.add_row("Output Folder", output_folder_path)
@@ -476,7 +496,7 @@ if __name__ == "__main__":
     console.print("-" * 30) # Separator
 
     # --- Run Simulation ---
-    results = run_openai_pandemic_simulation(
+    results = run_pandemic_simulation(
         console=console,
         openai_api_key=openai_key,
         num_regions=args.regions,
@@ -492,7 +512,8 @@ if __name__ == "__main__":
         use_colors=args.use_colors,
         output_folder=output_folder,
         blockchain_interface=blockchain_interface_instance, # Pass the created instance
-        use_blockchain=actual_use_blockchain_flag # Use the flag indicating successful init
+        use_blockchain=actual_use_blockchain_flag, # Use the flag indicating successful init
+        use_llm=args.use_llm
     )
 
     # --- Display Results ---
@@ -636,7 +657,8 @@ if __name__ == "__main__":
             console.print(f"[red]Error querying final blockchain state: {e}[/]")
 
     # Save console output to HTML
-    html_filename = "simulation_report_openai" + ("_blockchain" if actual_use_blockchain_flag else "") + ".html"
+    sim_mode_suffix = "_llm" if args.use_llm else "_rules"
+    html_filename = f"simulation_report{sim_mode_suffix}" + ("_blockchain" if actual_use_blockchain_flag else "") + ".html"
     save_console_html(console, output_folder=output_folder, filename=html_filename)
     console.print(f"\n[green]Visualizations and report saved to folder: '{output_folder}'[/]")
 

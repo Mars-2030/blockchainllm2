@@ -2,6 +2,7 @@
 
 """
 Manufacturer agent implementation for the pandemic supply chain simulation.
+Supports LLM and Rule-Based modes.
 """
 
 from typing import Dict, List, Optional, Any
@@ -10,86 +11,85 @@ import json
 
 from .base import OpenAIPandemicLLMAgent
 from config import Colors
-# Import BlockchainInterface for type hinting if needed, handle import error
+# --- MODIFICATION: Optional OpenAI Integration ---
+from src.llm.openai_integration import OpenAILLMIntegration
+from src.tools import PandemicSupplyChainTools
+
 try:
     from src.blockchain.interface import BlockchainInterface
 except ImportError:
     BlockchainInterface = None
-# Import the tools class
-from src.tools import PandemicSupplyChainTools
 
 
 class ManufacturerAgent(OpenAIPandemicLLMAgent):
-    """LLM-powered manufacturer agent using OpenAI."""
+    """Manufacturer agent supporting LLM or Rule-Based decisions."""
 
     def __init__(
         self,
         tools: PandemicSupplyChainTools,
-        openai_integration,
-        num_regions: int, # Add num_regions
+        openai_integration: Optional[OpenAILLMIntegration], # Accept Optional
+        num_regions: int,
         memory_length=10,
         verbose=True,
         console=None,
-        blockchain_interface: Optional[BlockchainInterface] = None # Add blockchain interface
+        blockchain_interface: Optional[BlockchainInterface] = None,
+        use_llm: bool = False # --- NEW FLAG ---
     ):
         super().__init__(
-            "manufacturer",
-            0, # Manufacturer ID is 0
-            tools,
-            openai_integration,
-            memory_length,
-            verbose,
+            agent_type="manufacturer",
+            agent_id=0, # Manufacturer ID is 0
+            tools=tools,
+            openai_integration=openai_integration, # Pass Optional integration
+            memory_length=memory_length,
+            verbose=verbose,
             console=console,
-            blockchain_interface=blockchain_interface, # Pass interface to base
-            num_regions=num_regions # Pass num_regions to base
+            blockchain_interface=blockchain_interface,
+            num_regions=num_regions, # Pass num_regions to base
+            use_llm=use_llm # Pass the flag to base
         )
-        # No need to store num_regions again, it's in self.num_regions from base
+        # self.num_regions is set in base class
 
     def decide(self, observation: Dict) -> Dict:
-        """Make production and allocation decisions using OpenAI."""
-        self.add_to_memory(observation) # Store current state
+        """Make production and allocation decisions based on mode (LLM or Rule-Based)."""
+        # --- MODIFICATION: Call base decide first for logging/memory ---
+        super().decide(observation) # Handles initial logging and memory update
 
-        # --- Query Blockchain for Trusted Data ---
+        # --- Query Blockchain (needed for both modes if available) ---
         blockchain_cases = None
-        if self.blockchain: # Check if blockchain is enabled for this agent
-             # Run the tool to get cases
+        if self.blockchain:
              blockchain_cases = self._run_blockchain_regional_cases_tool()
-             if blockchain_cases is None and self.verbose:
-                 self._print(f"[{Colors.FALLBACK}]Manufacturer failed to get cases from Blockchain. Fallback logic will use defaults/projections.[/]")
-        # Use a default (e.g., dictionary of zeros) if blockchain query failed or BC is disabled
-        if blockchain_cases is None:
-             # Ensure default covers the correct number of regions
-             blockchain_cases = {r: 0 for r in range(self.num_regions)} # Use self.num_regions
+        if blockchain_cases is None: # Use default if BC disabled or failed
+             blockchain_cases = {r: 0 for r in range(self.num_regions)}
 
-        # --- Use Other Tools (Run predictions first) ---
-        # Epidemic forecast tool now relies on projected demand from observation
+        # --- Use Other Tools (needed for both modes) ---
         epidemic_forecast_tool_output = self._run_epidemic_forecast_tool(observation)
         disruption_predictions = self._run_disruption_prediction_tool(observation)
 
-        # --- Production Decision ---
-        # Pass blockchain_cases for potential use in rules/fallback
-        production_decisions = self._make_production_decisions(observation, disruption_predictions, blockchain_cases)
-
-        # --- Allocation Decision ---
-        # Pass blockchain_cases to allocation decision method
-        allocation_decisions = self._make_allocation_decisions(observation, disruption_predictions, blockchain_cases)
+        # --- Branch based on mode ---
+        if self.use_llm:
+            production_decisions = self._make_production_decisions_llm(observation, disruption_predictions, blockchain_cases)
+            allocation_decisions = self._make_allocation_decisions_llm(observation, disruption_predictions, blockchain_cases)
+        else:
+            production_decisions = self._make_production_decisions_rules(observation, disruption_predictions, blockchain_cases)
+            allocation_decisions = self._make_allocation_decisions_rules(observation, disruption_predictions, blockchain_cases)
 
         return {
             "manufacturer_production": production_decisions,
             "manufacturer_allocation": allocation_decisions
         }
 
-    def _make_production_decisions(self, observation: Dict, disruption_predictions: Dict, blockchain_cases: Dict[int, int]) -> Dict:
-        """Determine production quantities using OpenAI API, with enhanced rules using blockchain cases."""
+    # --- LLM Path for Production ---
+    def _make_production_decisions_llm(self, observation: Dict, disruption_predictions: Dict, blockchain_cases: Dict[int, int]) -> Dict:
+        """Determine production quantities using LLM, with fallback and rules."""
         decision_type = "production"
-        # Prompt now implicitly uses observation where current_cases are removed
-        # The prompt instructs the LLM to assume external access to trusted cases
-        prompt = self._create_decision_prompt(observation, decision_type)
+        agent_name = self._get_agent_name()
+        mode_str = "[LLM]"
 
+        prompt = self._create_decision_prompt(observation, decision_type)
         structured_decision = self.openai.generate_structured_decision(prompt, decision_type)
 
         if self.verbose:
-            self._print(f"[{Colors.LLM_DECISION}][LLM Raw Decision ({self._get_agent_name()} - {decision_type})][/] {structured_decision}")
+            self._print(f"[{Colors.LLM_DECISION}]{mode_str}[LLM Raw Decision ({agent_name} - {decision_type})][/] {structured_decision}")
 
         production_decisions = {}
         num_drugs = len(observation.get("drug_info", {}))
@@ -99,155 +99,165 @@ class ManufacturerAgent(OpenAIPandemicLLMAgent):
              processed_llm = {}
              for drug_id_key, amount in structured_decision.items():
                  try:
-                      # Ensure key is processed as string first for capacity lookup
-                      drug_id_str = str(drug_id_key)
-                      drug_id = int(drug_id_str) # Then convert to int for logic/return
+                      drug_id = int(drug_id_key)
                       if 0 <= drug_id < num_drugs:
-                           prod_amount = max(0.0, float(amount))
-                           processed_llm[drug_id] = prod_amount
+                           processed_llm[drug_id] = max(0.0, float(amount))
                       else:
-                           if self.verbose: self._print(f"[yellow]Skipping invalid drug_id '{drug_id_key}' in {decision_type} decision.[/]")
+                           if self.verbose: self._print(f"[yellow]{mode_str}Skipping invalid drug_id '{drug_id_key}' in {agent_name} {decision_type}.[/]")
                  except (ValueError, TypeError) as e:
-                      if self.verbose: self._print(f"[yellow]Error processing {decision_type} decision item '{drug_id_key}': {amount} -> {e}. Skipping.[/]")
-
+                      if self.verbose: self._print(f"[yellow]{mode_str}Error processing {agent_name} {decision_type} item '{drug_id_key}': {amount} -> {e}. Skipping.[/]")
              if processed_llm:
                  llm_success = True
                  production_decisions = processed_llm
-                 # Apply capacity cap to initial LLM decisions
+                 # Apply capacity cap immediately to LLM decisions
                  for drug_id in list(production_decisions.keys()):
-                     drug_id_str = str(drug_id) # Use string key for observation lookup
-                     capacity = observation.get("production_capacity", {}).get(drug_id_str, 0)
+                     capacity = observation.get("production_capacity", {}).get(str(drug_id), 0)
                      production_decisions[drug_id] = min(production_decisions[drug_id], capacity)
-
 
         if not llm_success:
              if self.verbose:
-                 self._print(f"[{Colors.FALLBACK}][FALLBACK] LLM {self.agent_type} {decision_type} decision failed/invalid. Using fallback: Max capacity.[/]")
-             # Fallback: Produce at max capacity
-             for drug_id in range(num_drugs):
-                 drug_id_str = str(drug_id) # Use string key for observation lookup
-                 capacity = observation.get("production_capacity", {}).get(drug_id_str, 0)
-                 production_decisions[drug_id] = capacity
+                 self._print(f"[{Colors.FALLBACK}]{mode_str}[FALLBACK] LLM {agent_name} {decision_type} decision failed/invalid. Using fallback rules.[/]")
+             production_decisions = self._get_rule_based_production(observation) # Get initial rule-based decision
 
-        # Store decisions before rules for comparison
-        decisions_before_rules = production_decisions.copy()
+        # Apply adjustment rules
+        production_decisions = self._apply_production_rules(observation, production_decisions, disruption_predictions, blockchain_cases)
+
+        return {int(k): v for k, v in production_decisions.items()}
+
+    # --- Rule-Based Path for Production ---
+    def _make_production_decisions_rules(self, observation: Dict, disruption_predictions: Dict, blockchain_cases: Dict[int, int]) -> Dict:
+        """Determine production quantities using only rule-based logic."""
+        agent_name = self._get_agent_name()
+        mode_str = "[RULE-BASED]"
+        if self.verbose:
+             self._print(f"[{Colors.CYAN}]{mode_str} Calculating {agent_name} production decisions using rules...")
+
+        production_decisions = self._get_rule_based_production(observation)
+        production_decisions = self._apply_production_rules(observation, production_decisions, disruption_predictions, blockchain_cases)
+
+        return {int(k): v for k, v in production_decisions.items()}
+
+    # --- Helper: Calculate initial rule-based production (e.g., max capacity) ---
+    def _get_rule_based_production(self, observation: Dict) -> Dict[int, float]:
+        """ Calculates initial production quantities based on simple rules (e.g., max capacity). """
+        production_decisions = {}
+        num_drugs = len(observation.get("drug_info", {}))
+        # Fallback: Produce at max capacity initially, adjustments applied later
+        for drug_id in range(num_drugs):
+            capacity = observation.get("production_capacity", {}).get(str(drug_id), 0)
+            production_decisions[drug_id] = capacity
+        return production_decisions
+
+    # --- Helper: Apply adjustments to production decisions ---
+    def _apply_production_rules(self, observation: Dict, current_production: Dict, disruption_predictions: Dict, blockchain_cases: Dict[int, int]) -> Dict[int, float]:
+        """ Applies rule-based adjustments (scaling, buffers, batching) to production decisions. """
+        agent_name = self._get_agent_name()
+        mode_str = "[LLM]" if self.use_llm else "[RULE-BASED]"
+        decision_type = "production"
+        decisions_before_rules = current_production.copy()
         rules_applied_flag = False
-
-        # --- Apply Rule-Based Overrides/Adjustments ---
+        final_decisions = current_production.copy()
 
         # 1. Scaling based on projected demand and blockchain cases
-        # Use total projected demand and total blockchain cases to influence scaling
         total_projected_demand = sum(float(v) for v in observation.get("downstream_projected_demand_summary", {}).values() if v is not None)
         total_capacity = sum(float(c) for c in observation.get("production_capacity", {}).values() if c is not None)
         total_blockchain_cases = sum(blockchain_cases.values())
-
         production_scale_factor = 1.0
-        # Prioritize projected demand for scaling up aggressively
         if total_capacity > 0 and total_projected_demand > total_capacity * 0.8:
-            production_scale_factor = 1.2 # Moderate boost if projected demand is high
-            if self.verbose:
-                self._print(f"[{Colors.RULE}][RULE ADJUSTMENT] {self._get_agent_name()} - {decision_type}: Scaling up due to high projected demand vs capacity (factor: {production_scale_factor:.2f}).[/]")
-                rules_applied_flag = True
-        # Also consider scaling based on high absolute case numbers from blockchain
-        elif total_blockchain_cases > self.num_regions * 500: # Simple threshold based on average cases per region
-             production_scale_factor = 1.1 # Smaller boost if cases are high but projection isn't critical yet
-             if self.verbose:
-                 self._print(f"[{Colors.RULE}][RULE ADJUSTMENT] {self._get_agent_name()} - {decision_type}: Scaling up due to high total blockchain cases ({total_blockchain_cases}) (factor: {production_scale_factor:.2f}).[/]")
-                 rules_applied_flag = True
+            production_scale_factor = 1.2
+            if self.verbose: rules_applied_flag = True; self._print(f"[{Colors.RULE}]{mode_str}[RULE ADJUSTMENT] {agent_name} - {decision_type}: Scaling up due to high projected demand vs capacity (factor: {production_scale_factor:.2f}).[/]")
+        elif total_blockchain_cases > self.num_regions * 500:
+             production_scale_factor = 1.1
+             if self.verbose: rules_applied_flag = True; self._print(f"[{Colors.RULE}]{mode_str}[RULE ADJUSTMENT] {agent_name} - {decision_type}: Scaling up due to high total blockchain cases ({total_blockchain_cases}) (factor: {production_scale_factor:.2f}).[/]")
 
         if abs(production_scale_factor - 1.0) > 0.01:
-             for drug_id in production_decisions:
-                 drug_id_str = str(drug_id) # Use string key for observation lookup
-                 capacity = observation.get("production_capacity", {}).get(drug_id_str, 0)
-                 scaled_prod = production_decisions[drug_id] * production_scale_factor
-                 production_decisions[drug_id] = min(scaled_prod, capacity)
+             for drug_id in final_decisions:
+                 capacity = observation.get("production_capacity", {}).get(str(drug_id), 0)
+                 scaled_prod = final_decisions[drug_id] * production_scale_factor
+                 final_decisions[drug_id] = min(scaled_prod, capacity)
 
         # 2. Disruption-aware buffer planning
-        for drug_id in list(production_decisions.keys()):
-            drug_id_str = str(drug_id) # Use string key for observation lookup
-            disruption_risk = disruption_predictions.get("manufacturing", {}).get(drug_id_str, 0)
+        for drug_id in list(final_decisions.keys()):
+            disruption_risk = disruption_predictions.get("manufacturing", {}).get(str(drug_id), 0)
             if disruption_risk > 0.1:
-                 capacity = observation.get("production_capacity", {}).get(drug_id_str, 0)
-                 disruption_factor = (1 + 3 * disruption_risk) # More aggressive buffer
-                 if self.verbose:
-                     self._print(f"[{Colors.RULE}][RULE ADJUSTMENT] {self._get_agent_name()} - {decision_type} (Drug {drug_id}): Applying disruption buffer (risk: {disruption_risk:.2f}, factor: {disruption_factor:.2f}).[/]")
-                     rules_applied_flag = True
-                 disruption_adjusted_prod = production_decisions[drug_id] * disruption_factor
-                 production_decisions[drug_id] = min(disruption_adjusted_prod, capacity)
+                 capacity = observation.get("production_capacity", {}).get(str(drug_id), 0)
+                 disruption_factor = (1 + 3 * disruption_risk)
+                 if self.verbose: rules_applied_flag = True; self._print(f"[{Colors.RULE}]{mode_str}[RULE ADJUSTMENT] {agent_name} - {decision_type} (Drug {drug_id}): Applying disruption buffer (risk: {disruption_risk:.2f}, factor: {disruption_factor:.2f}).[/]")
+                 disruption_adjusted_prod = final_decisions[drug_id] * disruption_factor
+                 final_decisions[drug_id] = min(disruption_adjusted_prod, capacity)
 
         # 3. Warehouse Buffer Adjustments
-        for drug_id in list(production_decisions.keys()):
-            drug_id_str = str(drug_id) # Use string key for observation lookup
-            manu_inv = observation.get("inventories", {}).get(drug_id_str, 0)
-            wh_inv = observation.get("warehouse_inventories", {}).get(drug_id_str, 0)
+        for drug_id in list(final_decisions.keys()):
+            manu_inv = observation.get("inventories", {}).get(str(drug_id), 0)
+            wh_inv = observation.get("warehouse_inventories", {}).get(str(drug_id), 0)
             total_inv = manu_inv + wh_inv
-            capacity = observation.get("production_capacity", {}).get(drug_id_str, 0)
-
+            capacity = observation.get("production_capacity", {}).get(str(drug_id), 0)
             adjustment_factor = 1.0
             if capacity > 0:
-                # Use projected demand for cover calculation if available, otherwise use capacity
-                proj_demand_summary = observation.get("downstream_projected_demand_summary", {}).get(drug_id_str)
-                if proj_demand_summary is not None and proj_demand_summary > 1e-6:
-                    inv_days_cover = total_inv / proj_demand_summary
-                else: # Fallback to capacity if no projection
-                    inv_days_cover = total_inv / capacity if capacity > 1 else total_inv
+                proj_demand_summary = observation.get("downstream_projected_demand_summary", {}).get(str(drug_id))
+                inv_days_cover = float('inf')
+                if proj_demand_summary is not None and proj_demand_summary > 1e-6: inv_days_cover = total_inv / proj_demand_summary
+                elif capacity > 1: inv_days_cover = total_inv / capacity
+                else: inv_days_cover = total_inv
 
-                # Adjusted thresholds and factors based on days cover
-                if inv_days_cover > 7: adjustment_factor = 0.7 # Reduce if very high cover
-                elif inv_days_cover > 4: adjustment_factor = 0.9 # Slight reduction if high cover
-                elif inv_days_cover < 1.5: adjustment_factor = 1.5 # Boost if low cover
-                elif inv_days_cover < 3: adjustment_factor = 1.2 # Slight boost if moderately low cover
-
+                if inv_days_cover > 7: adjustment_factor = 0.7
+                elif inv_days_cover > 4: adjustment_factor = 0.9
+                elif inv_days_cover < 1.5: adjustment_factor = 1.5
+                elif inv_days_cover < 3: adjustment_factor = 1.2
             if abs(adjustment_factor - 1.0) > 0.01:
-                 if self.verbose:
-                     self._print(f"[{Colors.RULE}][RULE ADJUSTMENT] {self._get_agent_name()} - {decision_type} (Drug {drug_id}): Applying warehouse buffer adjustment (cover: {inv_days_cover:.1f}d, factor: {adjustment_factor:.2f}).[/]")
-                     rules_applied_flag = True
-                 adjusted_prod = production_decisions[drug_id] * adjustment_factor
-                 min_prod = capacity * 0.1 # Ensure some minimum production if capacity exists
-                 production_decisions[drug_id] = min(max(adjusted_prod, min_prod), capacity)
+                 if self.verbose: rules_applied_flag = True; self._print(f"[{Colors.RULE}]{mode_str}[RULE ADJUSTMENT] {agent_name} - {decision_type} (Drug {drug_id}): Applying warehouse buffer adjustment (cover: {inv_days_cover:.1f}d, factor: {adjustment_factor:.2f}).[/]")
+                 adjusted_prod = final_decisions[drug_id] * adjustment_factor
+                 min_prod = capacity * 0.1
+                 final_decisions[drug_id] = min(max(adjusted_prod, min_prod), capacity)
 
         # 4. Batch Allocation Awareness
         if "batch_allocation_frequency" in observation:
             days_to_next_batch = observation.get("days_to_next_batch_process", 0)
             batch_freq = observation.get("batch_allocation_frequency", 1)
-            # Boost production more significantly if batch processing is imminent (1 or 2 days away)
             if batch_freq > 1 and days_to_next_batch <= 2:
-                batch_boost_factor = 1.3 # Slightly increased boost
-                if self.verbose:
-                     self._print(f"[{Colors.RULE}][RULE ADJUSTMENT] {self._get_agent_name()} - {decision_type}: Boosting production before batch day (factor: {batch_boost_factor:.2f}).[/]")
-                     rules_applied_flag = True
-                for drug_id in production_decisions:
-                    drug_id_str = str(drug_id) # Use string key for observation lookup
-                    capacity = observation.get("production_capacity", {}).get(drug_id_str, 0)
-                    batch_boosted_prod = production_decisions[drug_id] * batch_boost_factor
-                    production_decisions[drug_id] = min(batch_boosted_prod, capacity)
+                batch_boost_factor = 1.3
+                if self.verbose: rules_applied_flag = True; self._print(f"[{Colors.RULE}]{mode_str}[RULE ADJUSTMENT] {agent_name} - {decision_type}: Boosting production before batch day (factor: {batch_boost_factor:.2f}).[/]")
+                for drug_id in final_decisions:
+                    capacity = observation.get("production_capacity", {}).get(str(drug_id), 0)
+                    batch_boosted_prod = final_decisions[drug_id] * batch_boost_factor
+                    final_decisions[drug_id] = min(batch_boosted_prod, capacity)
 
-        # --- Add printing for final adjusted decision ---
-        if self.verbose and rules_applied_flag:
-             print_before = {k: f"{v:.1f}" for k, v in decisions_before_rules.items()}
-             print_after = {k: f"{v:.1f}" for k, v in production_decisions.items()}
-             if json.dumps(print_before) != json.dumps(print_after):
-                 self._print(f"[{Colors.RULE}][RULE FINAL] {self._get_agent_name()} - {decision_type} After Rules:[/]\n  Before: {print_before}\n   After: {print_after}")
+        # Final Logging
+        if self.verbose:
+             print_after = {k: f"{v:.1f}" for k, v in final_decisions.items()}
+             log_prefix = ""
+             changed = rules_applied_flag and json.dumps({k: f"{v:.1f}" for k, v in decisions_before_rules.items()}) != json.dumps(print_after)
+
+             if not self.use_llm:
+                 log_prefix = f"[{Colors.DECISION}]{mode_str}[FINAL Decision]"
+                 if rules_applied_flag and changed: log_prefix = f"[{Colors.RULE}]{mode_str}[RULE FINAL]"
              else:
-                  self._print(f"[{Colors.DECISION}][FINAL Decision] {self._get_agent_name()} - {decision_type} (Rules checked, no change):[/] {print_after}")
-        elif self.verbose:
-             print_after = {k: f"{v:.1f}" for k, v in production_decisions.items()}
-             self._print(f"[{Colors.DECISION}][FINAL Decision] {self._get_agent_name()} - {decision_type}:[/] {print_after}")
+                  log_prefix = f"[{Colors.DECISION}]{mode_str}[FINAL Decision]"
+                  if rules_applied_flag and changed: log_prefix = f"[{Colors.RULE}]{mode_str}[RULE FINAL]"
+                  # Cannot easily detect LLM fallback here without more state
 
-        return {int(k): v for k, v in production_decisions.items()} # Return with integer keys
+             if rules_applied_flag and changed:
+                 print_before = {k: f"{v:.1f}" for k, v in decisions_before_rules.items()}
+                 self._print(f"{log_prefix} {agent_name} - {decision_type} After Rules:[/]\n  Before: {print_before}\n   After: {print_after}")
+             else:
+                 rule_status = "(Rules checked, no change)" if rules_applied_flag else ""
+                 self._print(f"{log_prefix} {agent_name} - {decision_type} {rule_status}:[/] {print_after}")
+
+        return final_decisions
 
 
-    def _make_allocation_decisions(self, observation: Dict, disruption_predictions: Dict, blockchain_cases: Dict[int, int]) -> Dict:
-        """Determine allocation quantities using OpenAI API, using blockchain cases for rules/fallback."""
+    # --- LLM Path for Allocation ---
+    def _make_allocation_decisions_llm(self, observation: Dict, disruption_predictions: Dict, blockchain_cases: Dict[int, int]) -> Dict:
+        """Determine allocation quantities using LLM, with fallback and rules."""
         decision_type = "allocation"
-        # Prompt implicitly uses cleaned observation (no direct cases/trend)
-        # Instructs LLM to assume external access to trusted cases
-        prompt = self._create_decision_prompt(observation, decision_type)
+        agent_name = self._get_agent_name()
+        mode_str = "[LLM]"
 
+        prompt = self._create_decision_prompt(observation, decision_type)
         structured_decision = self.openai.generate_structured_decision(prompt, decision_type)
 
         if self.verbose:
-            self._print(f"[{Colors.LLM_DECISION}][LLM Raw Decision ({self._get_agent_name()} - {decision_type})][/] {structured_decision}")
+            self._print(f"[{Colors.LLM_DECISION}]{mode_str}[LLM Raw Decision ({agent_name} - {decision_type})][/] {structured_decision}")
 
         allocation_decisions = {} # Stores {drug_id: {region_id: amount}}
         num_drugs = len(observation.get("drug_info", {}))
@@ -263,264 +273,238 @@ class ManufacturerAgent(OpenAIPandemicLLMAgent):
                            for region_id_key, amount in region_allocs.items():
                                 try:
                                      region_id = int(region_id_key)
-                                     # Use self.num_regions for validation
                                      if 0 <= region_id < self.num_regions:
-                                          alloc_amount = max(0.0, float(amount))
-                                          drug_allocs[region_id] = alloc_amount
+                                          drug_allocs[region_id] = max(0.0, float(amount))
                                      else:
-                                         if self.verbose: self._print(f"[yellow]Skipping invalid region_id '{region_id_key}' in allocation for Drug {drug_id}.[/]")
+                                         if self.verbose: self._print(f"[yellow]{mode_str}Skipping invalid region_id '{region_id_key}' in allocation for Drug {drug_id}.[/]")
                                 except (ValueError, TypeError):
-                                     if self.verbose: self._print(f"[yellow]Error processing allocation amount for Drug {drug_id}, Region '{region_id_key}': {amount}. Skipping.[/]")
-                           if drug_allocs:
-                               processed_llm[drug_id] = drug_allocs
+                                     if self.verbose: self._print(f"[yellow]{mode_str}Error processing allocation amount for Drug {drug_id}, Region '{region_id_key}': {amount}. Skipping.[/]")
+                           if drug_allocs: processed_llm[drug_id] = drug_allocs
                  except (ValueError, TypeError) as e:
-                      if self.verbose: self._print(f"[yellow]Error processing allocation decision item '{drug_id_key}': {region_allocs} -> {e}. Skipping.[/]")
-
+                      if self.verbose: self._print(f"[yellow]{mode_str}Error processing allocation decision item '{drug_id_key}': {region_allocs} -> {e}. Skipping.[/]")
              if processed_llm:
                  llm_success = True
-                 allocation_decisions = processed_llm # Start with LLM suggestions
-
+                 allocation_decisions = processed_llm
 
         if not llm_success:
             if self.verbose:
-                self._print(f"[{Colors.FALLBACK}][FALLBACK] LLM {self.agent_type} {decision_type} decision failed/invalid. Using fallback: Fair allocation based on projected demand & blockchain cases.[/]")
+                self._print(f"[{Colors.FALLBACK}]{mode_str}[FALLBACK] LLM {agent_name} {decision_type} decision failed/invalid. Using fallback rules.[/]")
+            allocation_decisions = self._get_rule_based_allocations(observation, blockchain_cases) # Get initial rule-based decision
 
-            # --- REVISED FALLBACK Logic using Projected Demand First ---
-            allocation_decisions = {} # Initialize
-            lookahead_days = 7 # How many days of demand to cover? (TUNABLE)
+        # Apply adjustment rules
+        allocation_decisions = self._apply_allocation_rules(observation, allocation_decisions, blockchain_cases)
 
-            for drug_id in range(num_drugs):
-                drug_id_str = str(drug_id) # Use string key for observation lookup
-                available_inventory = observation.get("inventories", {}).get(drug_id_str, 0)
-                if available_inventory <= 0: continue
+        # Final format check
+        final_allocations = {}
+        for drug_id, allocs in allocation_decisions.items():
+            int_allocs = {int(k): v for k, v in allocs.items() if v > 0.01}
+            if int_allocs: final_allocations[int(drug_id)] = int_allocs
+        return final_allocations
 
-                drug_info = observation.get("drug_info", {}).get(drug_id_str, {})
+    # --- Rule-Based Path for Allocation ---
+    def _make_allocation_decisions_rules(self, observation: Dict, disruption_predictions: Dict, blockchain_cases: Dict[int, int]) -> Dict:
+        """Determine allocation quantities using only rule-based logic."""
+        agent_name = self._get_agent_name()
+        mode_str = "[RULE-BASED]"
+        if self.verbose:
+             self._print(f"[{Colors.CYAN}]{mode_str} Calculating {agent_name} allocation decisions using rules...")
 
-                region_needs = {}
-                # --- Prioritize using per-region projected demand from observation ---
-                regional_proj_demand = {}
-                epidemiological_data = observation.get("epidemiological_data", {})
-                for r_id_str, epi_data in epidemiological_data.items():
-                     try:
-                         r_id = int(r_id_str)
-                         # Access nested projected_demand dict
-                         demand = epi_data.get("projected_demand", {}).get(drug_id_str, 0)
-                         regional_proj_demand[r_id] = max(0, float(demand))
-                     except (ValueError, TypeError): continue
+        allocation_decisions = self._get_rule_based_allocations(observation, blockchain_cases)
+        allocation_decisions = self._apply_allocation_rules(observation, allocation_decisions, blockchain_cases)
 
-                # Use regional projections if available and meaningful
-                if regional_proj_demand and sum(regional_proj_demand.values()) > 1e-6:
-                    if self.verbose: self._print(f"[dim]Fallback allocation for Drug {drug_id}: Using per-region projected demand.[/dim]")
+        # Final format check
+        final_allocations = {}
+        for drug_id, allocs in allocation_decisions.items():
+            int_allocs = {int(k): v for k, v in allocs.items() if v > 0.01}
+            if int_allocs: final_allocations[int(drug_id)] = int_allocs
+        return final_allocations
+
+    # --- Helper: Calculate initial rule-based allocations ---
+    def _get_rule_based_allocations(self, observation: Dict, blockchain_cases: Dict[int, int]) -> Dict[int, Dict[int, float]]:
+        """ Calculates initial allocation quantities based on rules (fair allocation tool). """
+        allocation_decisions = {}
+        num_drugs = len(observation.get("drug_info", {}))
+        mode_str = "[LLM]" if self.use_llm else "[RULE-BASED]" # Include mode in verbose print
+        lookahead_days = 7
+
+        for drug_id in range(num_drugs):
+            drug_id_str = str(drug_id)
+            available_inventory = observation.get("inventories", {}).get(drug_id_str, 0)
+            if available_inventory <= 0: continue
+            drug_info = observation.get("drug_info", {}).get(drug_id_str, {})
+
+            region_needs = {}
+            # --- Prioritize using per-region projected demand ---
+            regional_proj_demand = {}
+            for r_id_str, epi_data in observation.get("epidemiological_data", {}).items():
+                 try:
+                     r_id = int(r_id_str)
+                     demand = epi_data.get("projected_demand", {}).get(drug_id_str, 0)
+                     regional_proj_demand[r_id] = max(0, float(demand))
+                 except (ValueError, TypeError): continue
+            if regional_proj_demand and sum(regional_proj_demand.values()) > 1e-6:
+                if self.verbose: self._print(f"[dim]{mode_str}Fallback/Rule allocation (Drug {drug_id}): Using per-region projected demand.[/dim]")
+                for region_id in range(self.num_regions):
+                    region_needs[region_id] = max(0, regional_proj_demand.get(region_id, 0) * lookahead_days)
+            # --- Fallback 1: Use downstream summary distributed by BC cases ---
+            elif "downstream_projected_demand_summary" in observation:
+                total_proj_demand_summary = observation["downstream_projected_demand_summary"].get(drug_id_str)
+                if total_proj_demand_summary is not None:
+                    if self.verbose: self._print(f"[dim]{mode_str}Fallback/Rule allocation (Drug {drug_id}): Using total projected demand distributed by BC cases.[/dim]")
+                    total_bc_cases = sum(blockchain_cases.values())
                     for region_id in range(self.num_regions):
-                        daily_need = regional_proj_demand.get(region_id, 0)
-                        total_need = daily_need * lookahead_days
-                        region_needs[region_id] = max(0, total_need) # Need based on projection
+                        case_prop = (blockchain_cases.get(region_id, 0) / total_bc_cases) if total_bc_cases > 0 else (1.0 / self.num_regions if self.num_regions > 0 else 0)
+                        region_needs[region_id] = max(0, total_proj_demand_summary * case_prop * lookahead_days)
+                else: regional_proj_demand = None # Signal absolute fallback
+            # --- Fallback 2: Estimate from cases * factor ---
+            if not region_needs:
+                  if self.verbose: self._print(f"[yellow]{mode_str}Fallback/Rule allocation (Drug {drug_id}): No projected demand found, estimating from blockchain cases * factor.[/]")
+                  base_demand_per_1k_cases = drug_info.get("base_demand", 10) / 1000
+                  for region_id in range(self.num_regions):
+                       region_needs[region_id] = max(0, blockchain_cases.get(region_id, 0) * base_demand_per_1k_cases * lookahead_days)
 
-                # --- Fallback 1: Use downstream summary distributed by BC cases ---
-                elif "downstream_projected_demand_summary" in observation:
-                    total_proj_demand_summary = observation["downstream_projected_demand_summary"].get(drug_id_str)
-                    if total_proj_demand_summary is not None:
-                        if self.verbose: self._print(f"[dim]Fallback allocation for Drug {drug_id}: Using total projected demand distributed by BC cases.[/dim]")
-                        total_blockchain_cases = sum(blockchain_cases.values())
-                        for region_id in range(self.num_regions):
-                            current_bc_cases = blockchain_cases.get(region_id, 0)
-                            case_proportion = 0.0
-                            if total_blockchain_cases > 0: case_proportion = current_bc_cases / total_blockchain_cases
-                            elif self.num_regions > 0: case_proportion = 1.0 / self.num_regions
-                            estimated_daily_regional_demand = total_proj_demand_summary * case_proportion
-                            total_need = estimated_daily_regional_demand * lookahead_days
-                            region_needs[region_id] = max(0, total_need)
-                    else: # If summary key exists but value is None, use absolute fallback
-                         regional_proj_demand = None # Signal to use absolute fallback
+            if not region_needs or available_inventory <= 0: continue
 
-                # --- Fallback 2 (Absolute): Estimate from cases * factor if no projections found ---
-                if not region_needs: # If region_needs is still empty after projection checks
-                      if self.verbose: self._print(f"[yellow]Fallback allocation for Drug {drug_id}: No projected demand found, estimating from blockchain cases * factor.[/]")
-                      base_demand_per_1k_cases = drug_info.get("base_demand", 10) / 1000 # Use drug's base demand factor
-                      for region_id in range(self.num_regions):
-                           current_bc_cases = blockchain_cases.get(region_id, 0)
-                           estimated_daily_regional_demand = current_bc_cases * base_demand_per_1k_cases
-                           total_need = estimated_daily_regional_demand * lookahead_days
-                           region_needs[region_id] = max(0, total_need)
+            # Use allocation tool with calculated needs and BC cases for priority
+            fair_allocations = self._run_allocation_priority_tool(
+                drug_info, region_needs, blockchain_cases, available_inventory
+            )
+            if fair_allocations:
+                int_key_allocs = {int(k): v for k, v in fair_allocations.items()}
+                allocation_decisions[drug_id] = int_key_allocs
 
+        return allocation_decisions
 
-                if not region_needs or available_inventory <= 0: continue
-
-                # Call the allocation tool using the calculated region_needs as 'requests'
-                # Pass blockchain cases for priority weighting within the tool
-                fair_allocations = self._run_allocation_priority_tool(
-                    drug_info,
-                    region_needs,       # Pass the calculated needs
-                    blockchain_cases,   # Pass BC cases for priority weighting
-                    available_inventory
-                )
-
-                if fair_allocations:
-                   if drug_id not in allocation_decisions: allocation_decisions[drug_id] = {}
-                   # Use update to merge dicts correctly, ensuring int keys
-                   int_key_allocs = {int(k): v for k, v in fair_allocations.items()}
-                   allocation_decisions[drug_id].update(int_key_allocs)
-
-
-        # Store decisions before applying rules
-        decisions_before_rules = {
-            drug_id: regs.copy() for drug_id, regs in allocation_decisions.items()
-        } if allocation_decisions else {} # Handle empty initial decisions
+    # --- Helper: Apply adjustments to allocation decisions ---
+    def _apply_allocation_rules(self, observation: Dict, current_allocations: Dict, blockchain_cases: Dict[int, int]) -> Dict[int, Dict[int, float]]:
+        """ Applies rule-based adjustments (proactive, batching) to allocation decisions. """
+        agent_name = self._get_agent_name()
+        mode_str = "[LLM]" if self.use_llm else "[RULE-BASED]"
+        decision_type = "allocation"
+        decisions_before_rules = { drug_id: regs.copy() for drug_id, regs in current_allocations.items()}
         rules_applied_flag = False
+        final_decisions = current_allocations.copy() # Work on a copy
 
-
-        # --- Apply Rule-Based Overrides/Adjustments ---
 
         # --- Proactive Allocation Rule using Blockchain Cases ---
-        critical_downstream_days = 5 # Threshold (TUNABLE)
-        proactive_allocation_factor = 0.3 # Allocate X% of AVAILABLE manu inv if downstream critical (TUNABLE)
-
-        # Determine if trend is positive based on blockchain cases (requires history or comparison)
-        # Simple heuristic: boost if total cases are high
+        critical_downstream_days = 5
+        proactive_allocation_factor = 0.3
         total_bc_cases = sum(blockchain_cases.values())
-        # Adjusted threshold to be less sensitive, relying more on downstream cover
         is_overall_trend_positive = total_bc_cases > self.num_regions * 1000
 
-        # Iterate through downstream inventory summary
         for drug_id_str, summary_data in observation.get("downstream_inventory_summary", {}).items():
             try:
                 drug_id = int(drug_id_str)
                 current_manu_inv = observation.get("inventories", {}).get(drug_id_str, 0)
-                if current_manu_inv <= 0: continue # No inventory to proactively allocate
+                if current_manu_inv <= 0: continue
 
                 total_downstream_inv = summary_data.get("total_downstream", 0)
-                # Use total projected demand for downstream cover calculation
                 total_downstream_proj_demand = observation.get("downstream_projected_demand_summary", {}).get(drug_id_str)
-
-                # Calculate days cover only if projected demand is positive
-                days_cover = float('inf') # Default to infinite cover if no demand
+                days_cover = float('inf')
                 if total_downstream_proj_demand is not None and total_downstream_proj_demand > 1e-6:
                     days_cover = total_downstream_inv / total_downstream_proj_demand
 
-                # Trigger proactive allocation if cover is critically low OR if cases are very high (regardless of cover)
                 trigger_proactive = (days_cover < critical_downstream_days) or \
-                                    (is_overall_trend_positive and days_cover < critical_downstream_days * 1.5) # Slightly higher cover threshold if cases are high
+                                    (is_overall_trend_positive and days_cover < critical_downstream_days * 1.5)
 
                 if trigger_proactive:
                     proactive_amount_to_allocate = current_manu_inv * proactive_allocation_factor
-
-                    if proactive_amount_to_allocate > 1: # Only allocate meaningful amounts
+                    if proactive_amount_to_allocate > 1:
                         if self.verbose:
-                            trigger_reason = f"low downstream cover ({days_cover:.1f}d < {critical_downstream_days}d)" if days_cover < critical_downstream_days else f"high cases ({total_bc_cases}) & moderate cover ({days_cover:.1f}d)"
-                            self._print(f"[{Colors.RULE}][RULE ADJUSTMENT] {self._get_agent_name()} - {decision_type} (Drug {drug_id}): Proactively allocating {proactive_amount_to_allocate:.1f} units due to {trigger_reason}.[/]")
+                            trigger_reason = f"low downstream cover ({days_cover:.1f}d)" if days_cover < critical_downstream_days else f"high cases ({total_bc_cases}) & moderate cover ({days_cover:.1f}d)"
+                            self._print(f"[{Colors.RULE}]{mode_str}[RULE ADJUSTMENT] {agent_name} - {decision_type} (Drug {drug_id}): Proactively allocating {proactive_amount_to_allocate:.1f} units due to {trigger_reason}.[/]")
                             rules_applied_flag = True
 
-                        # --- Estimate regional needs again using preferred projection method ---
+                        # --- Estimate regional needs again for proactive distribution ---
                         region_needs_proactive = {}
                         regional_proj_demand_proactive = {}
-                        epidemiological_data_proactive = observation.get("epidemiological_data", {})
-                        for r_id_str_proactive, epi_data_proactive in epidemiological_data_proactive.items():
-                            try:
-                                r_id_proactive = int(r_id_str_proactive)
-                                demand_proactive = epi_data_proactive.get("projected_demand", {}).get(drug_id_str, 0)
-                                regional_proj_demand_proactive[r_id_proactive] = max(0, float(demand_proactive))
-                            except (ValueError, TypeError): continue
-
+                        for r_id_str_p, epi_data_p in observation.get("epidemiological_data", {}).items():
+                             try: regional_proj_demand_proactive[int(r_id_str_p)] = max(0, float(epi_data_p.get("projected_demand", {}).get(drug_id_str, 0)))
+                             except (ValueError, TypeError): continue
                         if regional_proj_demand_proactive and sum(regional_proj_demand_proactive.values()) > 1e-6:
-                            for region_id_inner in range(self.num_regions):
-                                region_needs_proactive[region_id_inner] = regional_proj_demand_proactive.get(region_id_inner, 0)
+                            for region_id_inner in range(self.num_regions): region_needs_proactive[region_id_inner] = regional_proj_demand_proactive.get(region_id_inner, 0)
                         else: # Fallback estimation if regional projections are missing/zero
                              total_proj_demand_for_dist = observation.get("downstream_projected_demand_summary", {}).get(drug_id_str, 0)
-                             total_blockchain_cases_inner = sum(blockchain_cases.values())
-                             if total_proj_demand_for_dist is not None and total_blockchain_cases_inner > 0:
-                                 for region_id_inner in range(self.num_regions):
-                                      current_bc_cases_inner = blockchain_cases.get(region_id_inner, 0)
-                                      case_proportion = current_bc_cases_inner / total_blockchain_cases_inner
-                                      region_needs_proactive[region_id_inner] = max(0, total_proj_demand_for_dist * case_proportion)
+                             total_bc_cases_inner = sum(blockchain_cases.values())
+                             if total_proj_demand_for_dist is not None and total_bc_cases_inner > 0:
+                                 for region_id_inner in range(self.num_regions): region_needs_proactive[region_id_inner] = max(0, total_proj_demand_for_dist * (blockchain_cases.get(region_id_inner, 0) / total_bc_cases_inner))
                              else: # Absolute fallback
-                                  drug_info_proactive = observation.get("drug_info", {}).get(drug_id_str, {})
-                                  base_demand_per_1k_cases_proactive = drug_info_proactive.get("base_demand", 10) / 1000
-                                  for region_id_inner in range(self.num_regions):
-                                       current_bc_cases_inner = blockchain_cases.get(region_id_inner, 0)
-                                       region_needs_proactive[region_id_inner] = max(0, current_bc_cases_inner * base_demand_per_1k_cases_proactive)
+                                  drug_info_p = observation.get("drug_info", {}).get(drug_id_str, {})
+                                  base_demand_per_1k_p = drug_info_p.get("base_demand", 10) / 1000
+                                  for region_id_inner in range(self.num_regions): region_needs_proactive[region_id_inner] = max(0, blockchain_cases.get(region_id_inner, 0) * base_demand_per_1k_p)
 
-
-                        # Use the allocation tool with blockchain cases for prioritization
-                        if region_needs_proactive: # Only run if needs were calculated
+                        if region_needs_proactive:
                              proactive_fair_allocs = self._run_allocation_priority_tool(
                                  observation.get("drug_info", {}).get(drug_id_str, {}),
-                                 region_needs_proactive,
-                                 blockchain_cases, # Use BC cases for priority weighting
-                                 proactive_amount_to_allocate # Allocate only the proactively determined amount
+                                 region_needs_proactive, blockchain_cases, proactive_amount_to_allocate
                              )
-
-                             # Add proactive allocation to existing decision (ensure int keys)
-                             if drug_id not in allocation_decisions: allocation_decisions[drug_id] = {}
+                             if drug_id not in final_decisions: final_decisions[drug_id] = {}
                              for region_id_alloc, amount_alloc in proactive_fair_allocs.items():
                                  region_id_int = int(region_id_alloc)
-                                 current_alloc = allocation_decisions[drug_id].get(region_id_int, 0)
-                                 allocation_decisions[drug_id][region_id_int] = current_alloc + amount_alloc
-
+                                 final_decisions[drug_id][region_id_int] = final_decisions[drug_id].get(region_id_int, 0) + amount_alloc
             except (ValueError, KeyError, TypeError) as e:
-                if self.verbose: self._print(f"[yellow]Warning during proactive allocation rule for drug {drug_id_str}: {e}[/]")
+                if self.verbose: self._print(f"[yellow]{mode_str}Warning during proactive allocation rule for drug {drug_id_str}: {e}[/]")
                 continue
 
 
-        # Batch Allocation Adjustments (Existing - applied AFTER proactive rule)
+        # --- Batch Allocation Adjustments ---
         is_batch_processing_day = observation.get("is_batch_processing_day", True)
         batch_freq = observation.get("batch_allocation_frequency", 1)
-        if batch_freq > 1 and not is_batch_processing_day: # Apply scale-down only if batching AND not a batch day
-             if self.verbose:
-                  self._print(f"[{Colors.RULE}][RULE ADJUSTMENT] {self._get_agent_name()} - {decision_type}: Not a batch day (Freq={batch_freq}d), scaling down non-critical allocations.[/]")
-                  rules_applied_flag = True
-             for drug_id in list(allocation_decisions.keys()):
-                  drug_id_str = str(drug_id) # Use string key for observation lookup
-                  drug_info_batch = observation.get("drug_info", {}).get(drug_id_str, {})
-                  # Use criticality value for comparison
-                  is_critical = drug_info_batch.get("criticality_value", 0) >= 4 # 4 = Critical
-                  if not is_critical:
-                     if drug_id in allocation_decisions:
-                         for region_id in allocation_decisions[drug_id]:
-                             # Apply scaling factor (e.g., 0.25) only if not batch day
-                             allocation_decisions[drug_id][region_id] *= 0.25
+        if batch_freq > 1 and not is_batch_processing_day:
+             if self.verbose: rules_applied_flag = True; self._print(f"[{Colors.RULE}]{mode_str}[RULE ADJUSTMENT] {agent_name} - {decision_type}: Not a batch day (Freq={batch_freq}d), scaling down non-critical allocations.[/]")
+             for drug_id in list(final_decisions.keys()):
+                  drug_info_batch = observation.get("drug_info", {}).get(str(drug_id), {})
+                  is_critical = drug_info_batch.get("criticality_value", 0) >= 4
+                  if not is_critical and drug_id in final_decisions:
+                         for region_id in final_decisions[drug_id]:
+                             final_decisions[drug_id][region_id] *= 0.25
 
 
-        # --- Add printing for final adjusted decision ---
-        if self.verbose and rules_applied_flag:
-             print_before = {dr_id: {r_id: f"{v:.1f}" for r_id, v in regs.items()} for dr_id, regs in decisions_before_rules.items()}
-             print_after = {dr_id: {r_id: f"{v:.1f}" for r_id, v in regs.items()} for dr_id, regs in allocation_decisions.items()}
-             if json.dumps(print_before) != json.dumps(print_after):
-                 self._print(f"[{Colors.RULE}][RULE FINAL] {self._get_agent_name()} - {decision_type} After Rules:[/]\n  Before: {print_before}\n   After: {print_after}")
+        # Final Logging
+        if self.verbose:
+             print_after = {dr_id: {r_id: f"{v:.1f}" for r_id, v in regs.items()} for dr_id, regs in final_decisions.items()}
+             log_prefix = ""
+             changed = rules_applied_flag and json.dumps({dr_id: {r_id: f"{v:.1f}" for r_id, v in regs.items()} for dr_id, regs in decisions_before_rules.items()}) != json.dumps(print_after)
+
+             if not self.use_llm:
+                 log_prefix = f"[{Colors.DECISION}]{mode_str}[FINAL Decision]"
+                 if rules_applied_flag and changed: log_prefix = f"[{Colors.RULE}]{mode_str}[RULE FINAL]"
              else:
-                  self._print(f"[{Colors.DECISION}][FINAL Decision] {self._get_agent_name()} - {decision_type} (Rules checked, no change):[/] {print_after}")
-        elif self.verbose:
-             print_after = {dr_id: {r_id: f"{v:.1f}" for r_id, v in regs.items()} for dr_id, regs in allocation_decisions.items()}
-             self._print(f"[{Colors.DECISION}][FINAL Decision] {self._get_agent_name()} - {decision_type}:[/] {print_after}")
+                  log_prefix = f"[{Colors.DECISION}]{mode_str}[FINAL Decision]"
+                  if rules_applied_flag and changed: log_prefix = f"[{Colors.RULE}]{mode_str}[RULE FINAL]"
+                  # Cannot easily detect LLM fallback here without more state
+
+             if rules_applied_flag and changed:
+                 print_before = {dr_id: {r_id: f"{v:.1f}" for r_id, v in regs.items()} for dr_id, regs in decisions_before_rules.items()}
+                 self._print(f"{log_prefix} {agent_name} - {decision_type} After Rules:[/]\n  Before: {print_before}\n   After: {print_after}")
+             else:
+                 rule_status = "(Rules checked, no change)" if rules_applied_flag else ""
+                 self._print(f"{log_prefix} {agent_name} - {decision_type} {rule_status}:[/] {print_after}")
+
+        return final_decisions
 
 
-        # Ensure final decisions use integer keys and filter small amounts
-        final_allocations = {}
-        for drug_id, allocs in allocation_decisions.items():
-            # Ensure region keys are integers in the final output
-            int_allocs = {int(k): v for k, v in allocs.items() if v > 0.01} # Filter small/zero
-            if int_allocs: # Only add drug if there are allocations
-                 final_allocations[int(drug_id)] = int_allocs
-        return final_allocations
-
-
+# --- MODIFICATION: Update Factory Function ---
 def create_openai_manufacturer_agent(
-    tools: PandemicSupplyChainTools, # Pass tools instance
-    openai_integration,
-    num_regions: int, # Added num_regions
+    tools: PandemicSupplyChainTools,
+    openai_integration: Optional[OpenAILLMIntegration], # Accept Optional
+    num_regions: int,
     memory_length=10,
     verbose=True,
     console=None,
-    blockchain_interface: Optional[BlockchainInterface] = None # Added blockchain interface
+    blockchain_interface: Optional[BlockchainInterface] = None,
+    use_llm: bool = False # --- NEW FLAG ---
 ):
-    """Create a manufacturer agent powered by OpenAI."""
+    """Create a manufacturer agent (LLM or Rule-Based)."""
     return ManufacturerAgent(
         tools=tools,
-        openai_integration=openai_integration,
-        num_regions=num_regions, # Pass num_regions
+        openai_integration=openai_integration, # Pass Optional integration
+        num_regions=num_regions,
         memory_length=memory_length,
         verbose=verbose,
         console=console,
-        blockchain_interface=blockchain_interface # Pass interface
+        blockchain_interface=blockchain_interface,
+        use_llm=use_llm # Pass the flag
     )
 
 # --- END OF FILE src/agents/manufacturer.py ---
