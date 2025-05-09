@@ -16,6 +16,7 @@ except ImportError:
     BlockchainInterface = None
 # Import the tools class/module
 from src.tools import PandemicSupplyChainTools
+from src.llm.openai_integration import OpenAILLMIntegration
 
 
 class OpenAIPandemicLLMAgent:
@@ -34,7 +35,8 @@ class OpenAIPandemicLLMAgent:
         console=None,
         blockchain_interface: Optional[BlockchainInterface] = None, # Add blockchain interface
         # Add num_regions, will be set by subclasses if needed (like manufacturer)
-        num_regions: Optional[int] = None
+        num_regions: Optional[int] = None,
+        use_llm: bool = False
     ):
         self.agent_type = agent_type
         self.agent_id = agent_id
@@ -46,9 +48,16 @@ class OpenAIPandemicLLMAgent:
         self.blockchain = blockchain_interface # Store the blockchain interface instance
         # Store num_regions if provided, crucial for blockchain case query tool
         self.num_regions = num_regions if num_regions is not None else 0
+        self.use_llm = use_llm
         self.memory = []
         self.known_disruptions = []
         self.disruption_predictions = {} # Added to store tool output
+        
+        # --- Check if LLM is requested but integration is missing ---
+        if self.use_llm and not self.openai:
+             # This shouldn't happen if main.py handles init correctly, but as a safeguard:
+             self._print(f"[bold red]WARNING: Agent {self._get_agent_name()} created with use_llm=True but no OpenAI integration provided! Will default to rule-based.[/]")
+             self.use_llm = False
 
     def _print(self, message):
         """Helper to safely print using the stored console if verbose."""
@@ -94,13 +103,18 @@ class OpenAIPandemicLLMAgent:
 
 
     def decide(self, observation: Dict) -> Dict:
-        """Make a decision (placeholder, override in subclasses)."""
+        """
+        Make a decision based on the agent's mode (LLM or Rule-Based).
+        This method should be overridden by subclasses to implement specific logic branching.
+        """
+        # --- Add basic logging based on mode ---
+        mode_str = "[LLM]" if self.use_llm else "[RULE-BASED]"
         if self.verbose:
             agent_name = self._get_agent_name()
             agent_color = self._get_agent_color()
-            self._print(f"\n[{agent_color}]🤔 {agent_name} making decision (Day {observation.get('day', '?')})...[/]")
+            self._print(f"\n[{agent_color}]{mode_str} 🤔 {agent_name} making decision (Day {observation.get('day', '?')})...[/]")
         self.add_to_memory(observation)
-        # Subclasses will implement the actual decision logic
+        # Subclasses will implement the actual decision logic branching based on self.use_llm
         return {}
 
     def _get_agent_color(self):
@@ -184,6 +198,12 @@ class OpenAIPandemicLLMAgent:
 
     def _create_decision_prompt(self, observation: Dict, decision_type: str) -> str:
         """Create a detailed prompt for the OpenAI LLM, noting case data is external."""
+        
+        # --- Check added for safety, though should be guarded by caller ---
+        if not self.use_llm:
+             self._print("[yellow]Warning: _create_decision_prompt called when use_llm is False. Returning empty prompt.[/]")
+             return ""
+        
         current_day = observation.get("day", "N/A")
         agent_name = self._get_agent_name()
 
