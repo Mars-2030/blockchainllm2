@@ -144,14 +144,15 @@ A key feature is the integration of a blockchain (simulated locally using Hardha
         ```
     *   Run the main script, enabling blockchain integration. **Ensure the `--drugs` argument matches the number configured in `deploy.js` (Step 6 above)!**
         ```bash
-        # Example: 3 regions, 3 drugs (matching default deploy.js), 10 days, verbose
-        python main.py --regions 3 --drugs 3 --days 10 --use-blockchain --verbose
+        # Example: 3 regions, 3 drugs (matching default deploy.js), 10 days, using llm, verbose
+        python main.py --regions 3 --drugs 3 --days 10 --use-blockchain --use-llm
 
-        # Example: 5 regions, 5 drugs (requires deploy.js modification!), 50 days
-        # python main.py --regions 5 --drugs 5 --days 50 --use-blockchain --verbose
+        # Example: 5 regions, 5 drugs (requires deploy.js modification!), 50 days, rule based
+        # python main.py --regions 5 --drugs 5 --days 50 --use-blockchain
         ```
     *   The `--use-blockchain` flag is crucial to enable interaction with the Hardhat node and smart contract.
-    *   Use `--verbose` to see detailed agent decisions and blockchain logs.
+    *   The `--use-llm` flag is crucial to enable llm based decision making.
+    
 
 ## Using MetaMask with Local Hardhat (Optional)
 
